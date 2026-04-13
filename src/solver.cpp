@@ -412,7 +412,8 @@ OutputData run_simulation(const RunConfig& cfg) {
 void write_output_file(const OutputData& out, const RunConfig& cfg) {
     const double dx = (cfg.x1 - cfg.x0) / cfg.nx;
     const double dy = (cfg.y1 - cfg.y0) / cfg.ny;
-    const std::string filename = "test" + std::to_string(cfg.test) + "_"
+    const std::string folder = "output/";
+    const std::string filename = folder + "test" + std::to_string(cfg.test) + "_"
         + std::to_string(cfg.nx) + "x" + std::to_string(cfg.ny)
         + solver_suffix(cfg.solver) + divb_suffix(cfg.divb) + ".dat";
     std::ofstream file(filename);
