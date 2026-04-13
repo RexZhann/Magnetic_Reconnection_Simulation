@@ -25,8 +25,36 @@ double elapsed(Clock::time_point a, Clock::time_point b) {
     return Sec(b - a).count();
 }
 
+void set_normal_b_preserving_pressure(Vec& u, double normal_b, double gamma) {
+    const double rho = std::max(u[0], 1e-10);
+    const double vx = u[1] / rho;
+    const double vy = u[2] / rho;
+    const double vz = u[3] / rho;
+    const double old_bx = u[5];
+    const double by = u[6];
+    const double bz = u[7];
+    const double old_p = std::max((gamma - 1.0) * (u[4]
+                      - 0.5 * rho * (vx * vx + vy * vy + vz * vz)
+                      - 0.5 * (old_bx * old_bx + by * by + bz * bz)), 1e-10);
+    u[5] = normal_b;
+    u[4] = old_p / (gamma - 1.0)
+         + 0.5 * rho * (vx * vx + vy * vy + vz * vz)
+         + 0.5 * (normal_b * normal_b + by * by + bz * bz);
+}
+
+// CT mode parameters (both optional, pass nullptr for GLM/None):
+//   face_bn : face-centered normal B at each slic interface (size n+4).
+//             face_bn[i] for i=1..n+1 is the Bx (or By in rotated y-sweep) on
+//             the face between slic cells i and i+1.  Both Riemann states have
+//             their slot-5 (normal B) replaced by this value before the solve so
+//             no spurious normal-B jump is fed to HLLD.
+//   emf_out : receives the raw F[6] from the Riemann solver at each interface.
+//             For x-sweeps Ez = -F[6]; for y-sweeps (rotated) Ez = +F[6].
+//             The calling sweep function passes the correct sign to store_emf.
 void slic_step(ScratchBuf& sc, Row& wp, int n, double dt, double dx,
-               const RunConfig& cfg, DivergenceController& divb) {
+               const RunConfig& cfg, DivergenceController& divb,
+               const double* face_bn = nullptr,
+               double* emf_out = nullptr) {
     const int N = n + 4;
     sc.ensure(N);
     Row& uc = sc.uc; Row& d0 = sc.d0; Row& d1 = sc.d1; Row& delta = sc.delta;
@@ -64,31 +92,61 @@ void slic_step(ScratchBuf& sc, Row& wp, int n, double dt, double dx,
                - 0.5 * (Bx * Bx + By * By + Bz * Bz));
     };
 
+    const bool glm = divb.glm_enabled();
+    const double ch  = divb.characteristic_speed();
+
     for (int i = 1; i < N - 1; ++i) {
-        Vec fL = phys_flux(xL[i], cfg.gamma, divb.glm_enabled(), divb.characteristic_speed());
-        Vec fR = phys_flux(xR[i], cfg.gamma, divb.glm_enabled(), divb.characteristic_speed());
+        if (face_bn != nullptr) {
+            const double bn_left = (i > 1) ? face_bn[i - 1] : face_bn[1];
+            const double bn_right = (i <= n + 1) ? face_bn[i] : face_bn[n + 1];
+            set_normal_b_preserving_pressure(xL[i], bn_left, cfg.gamma);
+            set_normal_b_preserving_pressure(xR[i], bn_right, cfg.gamma);
+        }
+        Vec fL = phys_flux(xL[i], cfg.gamma, glm, ch);
+        Vec fR = phys_flux(xR[i], cfg.gamma, glm, ch);
         for (int k = 0; k < NVAR; ++k) {
             hL[i][k] = xL[i][k] - 0.5 * (dt / dx) * (fR[k] - fL[k]);
             hR[i][k] = xR[i][k] - 0.5 * (dt / dx) * (fR[k] - fL[k]);
         }
         if (hL[i][0] < 0.0 || hR[i][0] < 0.0 || check_pressure(hL[i]) < 0.0 || check_pressure(hR[i]) < 0.0) {
             hL[i] = uc[i]; hR[i] = uc[i];
+            if (face_bn != nullptr) {
+                const double bn_left = (i > 1) ? face_bn[i - 1] : face_bn[1];
+                const double bn_right = (i <= n + 1) ? face_bn[i] : face_bn[n + 1];
+                set_normal_b_preserving_pressure(hL[i], bn_left, cfg.gamma);
+                set_normal_b_preserving_pressure(hR[i], bn_right, cfg.gamma);
+            }
         }
     }
 
     for (int i = 1; i < n + 2; ++i) {
-        if (cfg.solver == SolverKind::FORCE) {
-            iflx[i] = force_flux(hR[i], hL[i + 1], dt, dx, cfg.gamma,
-                                 divb.glm_enabled(), divb.characteristic_speed());
+        if (face_bn != nullptr) {
+            // CT: override the normal B in both Riemann states with the
+            // authoritative face-centered value.  This prevents any normal-B
+            // jump from entering the solver and driving spurious divergence.
+            Vec uL = hR[i];
+            Vec uR = hL[i + 1];
+            set_normal_b_preserving_pressure(uL, face_bn[i], cfg.gamma);
+            set_normal_b_preserving_pressure(uR, face_bn[i], cfg.gamma);
+            if (cfg.solver == SolverKind::FORCE) {
+                iflx[i] = force_flux(uL, uR, dt, dx, cfg.gamma, false, 0.0);
+            } else {
+                iflx[i] = hlld_flux(uL, uR, cfg.gamma, false, 0.0);
+            }
+            // Store raw F[6] for the caller to convert to Ez and accumulate.
+            if (emf_out) emf_out[i] = iflx[i][6];
         } else {
-            iflx[i] = hlld_flux(hR[i], hL[i + 1], cfg.gamma,
-                                divb.glm_enabled(), divb.characteristic_speed());
+            if (cfg.solver == SolverKind::FORCE) {
+                iflx[i] = force_flux(hR[i], hL[i + 1], dt, dx, cfg.gamma, glm, ch);
+            } else {
+                iflx[i] = hlld_flux(hR[i], hL[i + 1], cfg.gamma, glm, ch);
+            }
         }
     }
 
     for (int i = 2; i < n + 2; ++i) {
         for (int k = 0; k < NVAR; ++k) {
-            if (!divb.glm_enabled() && k == 5) continue;
+            if (!glm && k == 5) continue;  // normal B is handled by CT Faraday update
             uc[i][k] -= (dt / dx) * (iflx[i][k] - iflx[i - 1][k]);
         }
     }
@@ -114,6 +172,8 @@ void ScratchBuf::ensure(int N) {
     resize_row(uc); resize_row(d0); resize_row(d1); resize_row(delta);
     resize_row(xL); resize_row(xR); resize_row(hL); resize_row(hR);
     resize_row(iflx); resize_row(s_row);
+    face_bn_buf.assign(N, 0.0);
+    emf_buf.assign(N, 0.0);
 }
 
 RunConfig make_config_for_test(int test, int nx, int ny,
@@ -177,15 +237,26 @@ void apply_bc(Grid& w, int nx, int ny, BC bcx, BC bcy) {
 
 void sweep_x(Grid& w, int nx, int ny, double dt, double dx, const RunConfig& cfg,
              DivergenceController& divb) {
+    const bool ct = divb.uses_face_centered_b();
     #pragma omp parallel
     {
         ScratchBuf sc;
         sc.ensure(nx + 4);
         #pragma omp for schedule(static)
         for (int j = 2; j < ny + 2; ++j) {
+            const int j_int = j - 2;
             Row& s = sc.s_row;
             for (int i = 0; i < nx + 4; ++i) s[i] = w[i][j];
-            slic_step(sc, s, nx, dt, dx, cfg, divb);
+            if (ct) {
+                divb.fill_face_bn_x(j_int, nx, sc.face_bn_buf.data());
+                slic_step(sc, s, nx, dt, dx, cfg, divb,
+                          sc.face_bn_buf.data(), sc.emf_buf.data());
+                // In the x-direction: F[6] = vx·By − vy·Bx = −Ez, so Ez = −F[6].
+                for (int ii = 1; ii <= nx + 1; ++ii) sc.emf_buf[ii] = -sc.emf_buf[ii];
+                divb.store_emf_x(j_int, nx, sc.emf_buf.data());
+            } else {
+                slic_step(sc, s, nx, dt, dx, cfg, divb);
+            }
             for (int i = 2; i < nx + 2; ++i) w[i][j] = s[i];
         }
     }
@@ -193,19 +264,31 @@ void sweep_x(Grid& w, int nx, int ny, double dt, double dx, const RunConfig& cfg
 
 void sweep_y(Grid& w, int nx, int ny, double dt, double dy, const RunConfig& cfg,
              DivergenceController& divb) {
+    const bool ct = divb.uses_face_centered_b();
     #pragma omp parallel
     {
         ScratchBuf sc;
         sc.ensure(ny + 4);
         #pragma omp for schedule(static)
         for (int i = 2; i < nx + 2; ++i) {
+            const int i_int = i - 2;
             Row& s = sc.s_row;
             for (int j = 0; j < ny + 4; ++j) {
                 s[j] = w[i][j];
                 std::swap(s[j][1], s[j][2]);
                 std::swap(s[j][5], s[j][6]);
             }
-            slic_step(sc, s, ny, dt, dy, cfg, divb);
+            if (ct) {
+                // In the rotated y-sweep frame slot-5 holds By_original.
+                // fill_face_bn_y returns face_.by[i_int][j-1] = By on y-faces.
+                divb.fill_face_bn_y(i_int, ny, sc.face_bn_buf.data());
+                slic_step(sc, s, ny, dt, dy, cfg, divb,
+                          sc.face_bn_buf.data(), sc.emf_buf.data());
+                // Rotated F[6] = Bx_orig·vy_orig − vx_orig·By_orig = +Ez; no sign flip.
+                divb.store_emf_y(i_int, ny, sc.emf_buf.data());
+            } else {
+                slic_step(sc, s, ny, dt, dy, cfg, divb);
+            }
             for (int j = 2; j < ny + 2; ++j) {
                 std::swap(s[j][1], s[j][2]);
                 std::swap(s[j][5], s[j][6]);
@@ -235,9 +318,23 @@ double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
     return cfg.cfl / smax;
 }
 
+// When face_field is provided (CT mode) the exact face-difference ∇·B is used,
+// which is the quantity preserved to machine precision by the Faraday update.
 std::vector<std::vector<double>> compute_divB(const Grid& w, int nx, int ny,
-                                              double dx, double dy) {
+                                              double dx, double dy,
+                                              const FaceField2D* face_field) {
     std::vector<std::vector<double>> dB(nx, std::vector<double>(ny, 0.0));
+    if (face_field && !face_field->empty()) {
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int i = 0; i < nx; ++i) {
+            for (int j = 0; j < ny; ++j) {
+                double d = (face_field->bx[i + 1][j] - face_field->bx[i][j]) / dx
+                         + (face_field->by[i][j + 1] - face_field->by[i][j]) / dy;
+                dB[i][j] = std::fabs(d);
+            }
+        }
+        return dB;
+    }
     #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 2; i < nx + 2; ++i) {
         for (int j = 2; j < ny + 2; ++j) {
@@ -250,7 +347,8 @@ std::vector<std::vector<double>> compute_divB(const Grid& w, int nx, int ny,
 }
 
 Diagnostics compute_diagnostics(const Grid& w, int nx, int ny,
-                                double dx, double dy) {
+                                double dx, double dy,
+                                const FaceField2D* face_field) {
     Diagnostics d;
     double min_rho = 1e30, min_p = 1e30, max_divB = 0.0, max_psi = 0.0, max_v = 0.0;
     #pragma omp parallel for collapse(2) schedule(static) \
@@ -262,9 +360,21 @@ Diagnostics compute_diagnostics(const Grid& w, int nx, int ny,
             min_p = std::min(min_p, p[4]);
             max_psi = std::max(max_psi, std::fabs(p[8]));
             max_v = std::max(max_v, std::sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3]));
-            double dBx = (w[i + 1][j][5] - w[i - 1][j][5]) / (2 * dx);
-            double dBy = (w[i][j + 1][6] - w[i][j - 1][6]) / (2 * dy);
-            max_divB = std::max(max_divB, std::fabs(dBx + dBy));
+            if (!face_field || face_field->empty()) {
+                double dBx = (w[i + 1][j][5] - w[i - 1][j][5]) / (2 * dx);
+                double dBy = (w[i][j + 1][6] - w[i][j - 1][6]) / (2 * dy);
+                max_divB = std::max(max_divB, std::fabs(dBx + dBy));
+            }
+        }
+    }
+    if (face_field && !face_field->empty()) {
+        #pragma omp parallel for collapse(2) reduction(max:max_divB) schedule(static)
+        for (int i = 0; i < nx; ++i) {
+            for (int j = 0; j < ny; ++j) {
+                double dBx = (face_field->bx[i + 1][j] - face_field->bx[i][j]) / dx;
+                double dBy = (face_field->by[i][j + 1] - face_field->by[i][j]) / dy;
+                max_divB = std::max(max_divB, std::fabs(dBx + dBy));
+            }
         }
     }
     d.min_rho = min_rho; d.min_p = min_p; d.max_divB = max_divB; d.max_psi = max_psi; d.max_v = max_v;
@@ -335,7 +445,11 @@ OutputData run_simulation(const RunConfig& cfg) {
 
     Grid w(cfg.nx + 4, std::vector<Vec>(cfg.ny + 4, Vec(NVAR, 0.0)));
     initialize_problem(w, cfg);
+    // Fill ghost cells before CT initializes face B from cell averages.
+    apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
     auto divb = make_divergence_controller(cfg.divb);
+    divb->set_adiabatic_index(cfg.gamma);
+    divb->set_boundary_conditions(cfg.bcx, cfg.bcy);
     divb->initialize(w, cfg.nx, cfg.ny, dx, dy);
 
     double t = 0.0;
@@ -372,7 +486,8 @@ OutputData run_simulation(const RunConfig& cfg) {
 
         if (step % 200 == 0) {
             apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
-            Diagnostics diag = compute_diagnostics(w, cfg.nx, cfg.ny, dx, dy);
+            Diagnostics diag = compute_diagnostics(w, cfg.nx, cfg.ny, dx, dy,
+                                                   divb->face_field());
             std::cout << "Step " << step
                       << "  t=" << t
                       << "  dt=" << dt
@@ -400,7 +515,7 @@ OutputData run_simulation(const RunConfig& cfg) {
     apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
     OutputData out;
     out.primitive = std::move(w);
-    out.divB = compute_divB(out.primitive, cfg.nx, cfg.ny, dx, dy);
+    out.divB = compute_divB(out.primitive, cfg.nx, cfg.ny, dx, dy, divb->face_field());
     out.timing = timing;
     if (const FaceField2D* ff = divb->face_field()) {
         out.has_face_field = true;
