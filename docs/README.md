@@ -1,17 +1,14 @@
-# Refactored 2D MHD Project
+# 2D MHD Project
 
-This layout keeps the original solver behavior, but separates:
-- state conversion and primitive/conservative flux utilities
-- Riemann solvers
-- divergence-control policy
-- time stepping / sweeps / cases / I/O
-- executable entry point
-- minimal regression tests
 
 ## Build
 
 ```bash
 make
+```
+or without make:
+```bash
+g++ -O3 -fopenmp -std=c++17 src/*.cpp -Iinclude -o mhd2d
 ```
 
 ## Run
