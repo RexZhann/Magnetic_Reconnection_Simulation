@@ -11,7 +11,7 @@ public:
     virtual bool uses_face_centered_b() const { return false; }
     virtual void update_characteristic_speed(double value) = 0;
     virtual double characteristic_speed() const = 0;
-    virtual void initialize(Grid& w, int nx, int ny, double dx, double dy) = 0;
+    virtual void initialize(Grid& w, const RunConfig& cfg, double dx, double dy) = 0;
     virtual void pre_step(Grid&, int, int, double, double, double) {}
     virtual void post_step(Grid& w, int nx, int ny, double dt, double Lx, double Ly,
                            double dx, double dy) = 0;
@@ -41,7 +41,7 @@ public:
     bool glm_enabled() const override { return false; }
     void update_characteristic_speed(double) override {}
     double characteristic_speed() const override { return 0.0; }
-    void initialize(Grid&, int, int, double, double) override {}
+    void initialize(Grid&, const RunConfig&, double, double) override {}
     void post_step(Grid&, int, int, double, double, double, double, double) override {}
 };
 
@@ -50,7 +50,7 @@ public:
     bool glm_enabled() const override { return true; }
     void update_characteristic_speed(double value) override { ch_ = value; }
     double characteristic_speed() const override { return ch_; }
-    void initialize(Grid&, int, int, double, double) override {}
+    void initialize(Grid&, const RunConfig&, double, double) override {}
     void post_step(Grid& w, int nx, int ny, double dt, double Lx, double Ly,
                    double dx, double dy) override;
 private:
@@ -78,7 +78,7 @@ public:
     double characteristic_speed() const override { return ch_like_; }
     void set_adiabatic_index(double gamma) override { gamma_ = gamma; }
     void set_boundary_conditions(BC bcx, BC bcy) override { bcx_ = bcx; bcy_ = bcy; }
-    void initialize(Grid& w, int nx, int ny, double dx, double dy) override;
+    void initialize(Grid& w, const RunConfig& cfg, double dx, double dy) override;
     void pre_step(Grid& w, int nx, int ny, double dt, double dx, double dy) override;
     void post_step(Grid& w, int nx, int ny, double dt, double Lx, double Ly,
                    double dx, double dy) override;
@@ -102,6 +102,7 @@ private:
     BC bcx_ = BC::Transmissive;
     BC bcy_ = BC::Transmissive;
 
+    void initialize_faces_from_problem(const Grid& w, const RunConfig& cfg, double dx, double dy);
     void fill_faces_from_cell_centered(const Grid& w, int nx, int ny);
     void compute_corner_emf_from_interface_emfs(const Grid& w, int nx, int ny,
                                                 double dx, double dy);

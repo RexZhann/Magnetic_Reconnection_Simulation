@@ -450,7 +450,7 @@ OutputData run_simulation(const RunConfig& cfg) {
     auto divb = make_divergence_controller(cfg.divb);
     divb->set_adiabatic_index(cfg.gamma);
     divb->set_boundary_conditions(cfg.bcx, cfg.bcy);
-    divb->initialize(w, cfg.nx, cfg.ny, dx, dy);
+    divb->initialize(w, cfg, dx, dy);
 
     double t = 0.0;
     int step = 0;

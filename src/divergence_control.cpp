@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <omp.h>
 
 namespace my_project {
@@ -48,18 +49,16 @@ void GLMDivergenceCleaning::post_step(Grid& w, int nx, int ny, double dt, double
 // ---------------------------------------------------------------------------
 // CT: initialization
 // ---------------------------------------------------------------------------
-void CTDivergenceControl::initialize(Grid& w, int nx, int ny, double /*dx*/, double /*dy*/) {
-    nx_ = nx;
-    ny_ = ny;
-    face_.resize(nx, ny);
+void CTDivergenceControl::initialize(Grid& w, const RunConfig& cfg, double dx, double dy) {
+    nx_ = cfg.nx;
+    ny_ = cfg.ny;
+    face_.resize(cfg.nx, cfg.ny);
     // Interface EMF arrays (same shape as face B arrays).
-    emf_x_.assign(nx + 1, std::vector<double>(ny, 0.0));
-    emf_y_.assign(nx, std::vector<double>(ny + 1, 0.0));
-    // Bootstrap face B from cell-centered initial conditions.
-    // apply_bc must have been called before this so ghost cells are valid.
-    fill_faces_from_cell_centered(w, nx, ny);
+    emf_x_.assign(cfg.nx + 1, std::vector<double>(cfg.ny, 0.0));
+    emf_y_.assign(cfg.nx, std::vector<double>(cfg.ny + 1, 0.0));
+    initialize_faces_from_problem(w, cfg, dx, dy);
     // Make cell-centered B self-consistent with face B.
-    sync_cell_centered_from_faces(w, nx, ny);
+    sync_cell_centered_from_faces(w, cfg.nx, cfg.ny);
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +145,85 @@ void CTDivergenceControl::store_emf_y(int i, int n, const double* emf) {
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const RunConfig& cfg,
+                                                        double dx, double dy) {
+    const auto sample_bx = [&](double x, double y) -> double {
+        switch (cfg.test) {
+            case 0:
+                return 0.0;
+            case 1:
+                (void)y;
+                return 0.75;
+            case 2: {
+                const double m = 0.5 * (cfg.y0 + cfg.y1);
+                return (y <= m) ? 1.0 : -1.0;
+            }
+            case 3: {
+                constexpr double pi = 3.14159265358979323846;
+                (void)x;
+                return -std::sin(2.0 * pi * y);
+            }
+            case 4: {
+                constexpr double pi = 3.14159265358979323846;
+                (void)x; (void)y;
+                return 2.5 / std::sqrt(4.0 * pi);
+            }
+            default:
+                return std::numeric_limits<double>::quiet_NaN();
+        }
+    };
+
+    const auto sample_by = [&](double x, double y) -> double {
+        switch (cfg.test) {
+            case 0:
+                return 0.0;
+            case 1: {
+                const double m = 0.5 * (cfg.x0 + cfg.x1);
+                (void)y;
+                return (x <= m) ? 1.0 : -1.0;
+            }
+            case 2:
+                (void)x; (void)y;
+                return 0.75;
+            case 3: {
+                constexpr double pi = 3.14159265358979323846;
+                (void)y;
+                return std::sin(4.0 * pi * x);
+            }
+            case 4:
+                (void)x; (void)y;
+                return 0.0;
+            default:
+                return std::numeric_limits<double>::quiet_NaN();
+        }
+    };
+
+    for (int i = 0; i < nx_ + 1; ++i) {
+        for (int j = 0; j < ny_; ++j) {
+            const double x = cfg.x0 + static_cast<double>(i) * dx;
+            const double y = cfg.y0 + (j + 0.5) * dy;
+            const double bx = sample_bx(x, y);
+            if (std::isnan(bx)) {
+                fill_faces_from_cell_centered(w, nx_, ny_);
+                return;
+            }
+            face_.bx[i][j] = bx;
+        }
+    }
+    for (int i = 0; i < nx_; ++i) {
+        for (int j = 0; j < ny_ + 1; ++j) {
+            const double x = cfg.x0 + (i + 0.5) * dx;
+            const double y = cfg.y0 + static_cast<double>(j) * dy;
+            const double by = sample_by(x, y);
+            if (std::isnan(by)) {
+                fill_faces_from_cell_centered(w, nx_, ny_);
+                return;
+            }
+            face_.by[i][j] = by;
+        }
+    }
+}
 
 // Average cell-centered B to faces using all available cells.
 // apply_bc must be called before this so ghost cells carry correct BC values:

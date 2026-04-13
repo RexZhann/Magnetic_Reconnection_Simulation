@@ -41,6 +41,21 @@ int main() {
         require(std::isfinite(max_db), "GLM divB is not finite");
     }
 
+    // --- CT initialization should start from a discrete divergence-free face field ---
+    {
+        RunConfig cfg = make_config_for_test(3, 32, 32, DivBCleaningKind::CT, SolverKind::HLLD);
+        cfg.t_end = 0.0;
+        OutputData out = run_simulation(cfg);
+
+        require(out.has_face_field, "CT init did not expose face-centered field");
+        require(out.timing.steps == 0, "CT init-only run unexpectedly advanced");
+
+        double max_db = 0.0;
+        for (const auto& row : out.divB) for (double v : row) max_db = std::max(max_db, v);
+        require(std::isfinite(max_db), "CT init divB is not finite");
+        require(max_db < 1e-12, "CT init face field is not discretely divergence-free");
+    }
+
     // --- CT simulation: face fields, physics, and divergence-free constraint ---
     {
         RunConfig cfg = make_config_for_test(0, 32, 32, DivBCleaningKind::CT, SolverKind::HLLD);
