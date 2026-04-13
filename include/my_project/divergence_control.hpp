@@ -104,8 +104,7 @@ private:
 
     void initialize_faces_from_problem(const Grid& w, const RunConfig& cfg, double dx, double dy);
     void fill_faces_from_cell_centered(const Grid& w, int nx, int ny);
-    void compute_corner_emf_from_interface_emfs(const Grid& w, int nx, int ny,
-                                                double dx, double dy);
+    void compute_corner_emf_from_interface_emfs(int nx, int ny);
     void update_faces_from_emf(int nx, int ny, double dt, double dx, double dy);
     void sync_cell_centered_from_faces(Grid& w, int nx, int ny) const;
     void apply_face_bc(int nx, int ny);

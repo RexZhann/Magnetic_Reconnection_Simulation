@@ -25,23 +25,6 @@ double elapsed(Clock::time_point a, Clock::time_point b) {
     return Sec(b - a).count();
 }
 
-void set_normal_b_preserving_pressure(Vec& u, double normal_b, double gamma) {
-    const double rho = std::max(u[0], 1e-10);
-    const double vx = u[1] / rho;
-    const double vy = u[2] / rho;
-    const double vz = u[3] / rho;
-    const double old_bx = u[5];
-    const double by = u[6];
-    const double bz = u[7];
-    const double old_p = std::max((gamma - 1.0) * (u[4]
-                      - 0.5 * rho * (vx * vx + vy * vy + vz * vz)
-                      - 0.5 * (old_bx * old_bx + by * by + bz * bz)), 1e-10);
-    u[5] = normal_b;
-    u[4] = old_p / (gamma - 1.0)
-         + 0.5 * rho * (vx * vx + vy * vy + vz * vz)
-         + 0.5 * (normal_b * normal_b + by * by + bz * bz);
-}
-
 // CT mode parameters (both optional, pass nullptr for GLM/None):
 //   face_bn : face-centered normal B at each slic interface (size n+4).
 //             face_bn[i] for i=1..n+1 is the Bx (or By in rotated y-sweep) on
@@ -96,12 +79,6 @@ void slic_step(ScratchBuf& sc, Row& wp, int n, double dt, double dx,
     const double ch  = divb.characteristic_speed();
 
     for (int i = 1; i < N - 1; ++i) {
-        if (face_bn != nullptr) {
-            const double bn_left = (i > 1) ? face_bn[i - 1] : face_bn[1];
-            const double bn_right = (i <= n + 1) ? face_bn[i] : face_bn[n + 1];
-            set_normal_b_preserving_pressure(xL[i], bn_left, cfg.gamma);
-            set_normal_b_preserving_pressure(xR[i], bn_right, cfg.gamma);
-        }
         Vec fL = phys_flux(xL[i], cfg.gamma, glm, ch);
         Vec fR = phys_flux(xR[i], cfg.gamma, glm, ch);
         for (int k = 0; k < NVAR; ++k) {
@@ -110,30 +87,23 @@ void slic_step(ScratchBuf& sc, Row& wp, int n, double dt, double dx,
         }
         if (hL[i][0] < 0.0 || hR[i][0] < 0.0 || check_pressure(hL[i]) < 0.0 || check_pressure(hR[i]) < 0.0) {
             hL[i] = uc[i]; hR[i] = uc[i];
-            if (face_bn != nullptr) {
-                const double bn_left = (i > 1) ? face_bn[i - 1] : face_bn[1];
-                const double bn_right = (i <= n + 1) ? face_bn[i] : face_bn[n + 1];
-                set_normal_b_preserving_pressure(hL[i], bn_left, cfg.gamma);
-                set_normal_b_preserving_pressure(hR[i], bn_right, cfg.gamma);
-            }
         }
     }
 
     for (int i = 1; i < n + 2; ++i) {
         if (face_bn != nullptr) {
             // CT: override the normal B in both Riemann states with the
-            // authoritative face-centered value.  This prevents any normal-B
-            // jump from entering the solver and driving spurious divergence.
+            // authoritative face-centered value so no spurious Bx jump
+            // enters the solver.
             Vec uL = hR[i];
             Vec uR = hL[i + 1];
-            set_normal_b_preserving_pressure(uL, face_bn[i], cfg.gamma);
-            set_normal_b_preserving_pressure(uR, face_bn[i], cfg.gamma);
+            uL[5] = face_bn[i];
+            uR[5] = face_bn[i];
             if (cfg.solver == SolverKind::FORCE) {
                 iflx[i] = force_flux(uL, uR, dt, dx, cfg.gamma, false, 0.0);
             } else {
                 iflx[i] = hlld_flux(uL, uR, cfg.gamma, false, 0.0);
             }
-            // Store raw F[6] for the caller to convert to Ez and accumulate.
             if (emf_out) emf_out[i] = iflx[i][6];
         } else {
             if (cfg.solver == SolverKind::FORCE) {
