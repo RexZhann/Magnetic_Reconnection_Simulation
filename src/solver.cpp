@@ -172,6 +172,39 @@ RunConfig make_config_for_test(int test, int nx, int ny,
         case 4:
             cfg.x0 = 0; cfg.x1 = 1; cfg.y0 = 0; cfg.y1 = 1; cfg.gamma = 5.0 / 3.0; cfg.t_end = 0.18;
             cfg.bcx = BC::Transmissive; cfg.bcy = BC::Transmissive; break;
+        // 1D shock-tube tests from Miyoshi & Kusano (2005).
+        // Domain [-0.5, 0.5] × [0, ny/nx] (square cells), γ=5/3, transmissive BC.
+        // Typical invocation: ./mhd2d <test> 800 4 1 1
+        case 5: // Dai & Woodward (1994) shock tube (Miyoshi Fig. 5), t=0.2
+            cfg.x0 = -0.5; cfg.x1 = 0.5;
+            cfg.y0 = 0.0;  cfg.y1 = static_cast<double>(ny) / nx;
+            cfg.gamma = 5.0 / 3.0; cfg.t_end = 0.2;
+            cfg.bcx = BC::Transmissive; cfg.bcy = BC::Transmissive; break;
+        case 6: // Brio & Wu (1988) shock tube, γ=5/3 (Miyoshi Fig. 8), t=0.1
+            cfg.x0 = -0.5; cfg.x1 = 0.5;
+            cfg.y0 = 0.0;  cfg.y1 = static_cast<double>(ny) / nx;
+            cfg.gamma = 5.0 / 3.0; cfg.t_end = 0.1;
+            cfg.bcx = BC::Transmissive; cfg.bcy = BC::Transmissive; break;
+        case 7: // Slow switch-off shock (Falle et al. 1998, Miyoshi Fig. 9), t=0.2
+            cfg.x0 = -0.5; cfg.x1 = 0.5;
+            cfg.y0 = 0.0;  cfg.y1 = static_cast<double>(ny) / nx;
+            cfg.gamma = 5.0 / 3.0; cfg.t_end = 0.2;
+            cfg.bcx = BC::Transmissive; cfg.bcy = BC::Transmissive; break;
+        case 8: // Slow switch-off rarefaction (Falle et al. 1998, Miyoshi Fig. 10), t=0.2
+            cfg.x0 = -0.5; cfg.x1 = 0.5;
+            cfg.y0 = 0.0;  cfg.y1 = static_cast<double>(ny) / nx;
+            cfg.gamma = 5.0 / 3.0; cfg.t_end = 0.2;
+            cfg.bcx = BC::Transmissive; cfg.bcy = BC::Transmissive; break;
+        case 9: // Super-fast rarefaction Mf=3.0 (Miyoshi Fig. 11), t=0.05
+            cfg.x0 = -0.5; cfg.x1 = 0.5;
+            cfg.y0 = 0.0;  cfg.y1 = static_cast<double>(ny) / nx;
+            cfg.gamma = 5.0 / 3.0; cfg.t_end = 0.05;
+            cfg.bcx = BC::Transmissive; cfg.bcy = BC::Transmissive; break;
+        case 10: // Super-fast rarefaction Mf=3.1 (Miyoshi Fig. 11), t=0.05
+            cfg.x0 = -0.5; cfg.x1 = 0.5;
+            cfg.y0 = 0.0;  cfg.y1 = static_cast<double>(ny) / nx;
+            cfg.gamma = 5.0 / 3.0; cfg.t_end = 0.05;
+            cfg.bcx = BC::Transmissive; cfg.bcy = BC::Transmissive; break;
         default:
             throw std::runtime_error("Unknown test id");
     }
@@ -398,6 +431,57 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
                         rho = 1; vxv = 0; vyv = 0;
                     }
                     w[i][j] = {rho, vxv, vyv, 0, 0.5, Bx0, 0, 0, 0};
+                    break;
+                }
+                // ---------------------------------------------------------------
+                // 1D shock-tube tests (Miyoshi & Kusano 2005).
+                // All use domain [-0.5,0.5]; discontinuity at x=0.
+                // Primitive state: {rho, vx, vy, vz, p, Bx, By, Bz, psi}
+                // ---------------------------------------------------------------
+                case 5: {
+                    // Dai & Woodward (1994) — Miyoshi Fig. 5
+                    // √(4π) = 3.54490770181103
+                    constexpr double sqrt4pi = 3.54490770181103;
+                    Vec L = {1.08, 1.2,  0.01, 0.5, 0.95,
+                             4.0/sqrt4pi, 3.6/sqrt4pi, 2.0/sqrt4pi, 0};
+                    Vec R = {1.0,  0.0,  0.0,  0.0, 1.0,
+                             4.0/sqrt4pi, 4.0/sqrt4pi, 2.0/sqrt4pi, 0};
+                    w[i][j] = (x < 0.0) ? L : R;
+                    break;
+                }
+                case 6: {
+                    // Brio & Wu (1988), γ=5/3 — Miyoshi Fig. 8
+                    Vec L = {1.0,   0, 0, 0, 1.0,   0.75,  1.0, 0, 0};
+                    Vec R = {0.125, 0, 0, 0, 0.1,   0.75, -1.0, 0, 0};
+                    w[i][j] = (x < 0.0) ? L : R;
+                    break;
+                }
+                case 7: {
+                    // Slow switch-off shock (Falle et al. 1998) — Miyoshi Fig. 9
+                    Vec L = {1.368, 0.269, 1.0, 0, 1.769, 1.0, 0.0, 0, 0};
+                    Vec R = {1.0,   0.0,   0.0, 0, 1.0,   1.0, 1.0, 0, 0};
+                    w[i][j] = (x < 0.0) ? L : R;
+                    break;
+                }
+                case 8: {
+                    // Slow switch-off rarefaction (Falle et al. 1998) — Miyoshi Fig. 10
+                    Vec L = {1.0,  0.0,   0.0,   0, 2.0,    1.0, 0.0,    0, 0};
+                    Vec R = {0.2,  1.186, 2.967, 0, 0.1368, 1.0, 1.6405, 0, 0};
+                    w[i][j] = (x < 0.0) ? L : R;
+                    break;
+                }
+                case 9: {
+                    // Super-fast expansion Mf=3.0 — Miyoshi Fig. 11
+                    Vec L = {1, -3.0, 0, 0, 0.45, 0, 0.5, 0, 0};
+                    Vec R = {1,  3.0, 0, 0, 0.45, 0, 0.5, 0, 0};
+                    w[i][j] = (x < 0.0) ? L : R;
+                    break;
+                }
+                case 10: {
+                    // Super-fast expansion Mf=3.1 — Miyoshi Fig. 11
+                    Vec L = {1, -3.1, 0, 0, 0.45, 0, 0.5, 0, 0};
+                    Vec R = {1,  3.1, 0, 0, 0.45, 0, 0.5, 0, 0};
+                    w[i][j] = (x < 0.0) ? L : R;
                     break;
                 }
                 default:
