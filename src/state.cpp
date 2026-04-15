@@ -5,7 +5,7 @@
 
 namespace my_project {
 
-double minbee(double r) {
+double minmod(double r) {
     if (r <= 0.0) return 0.0;
     if (r <= 1.0) return r;
     return 1.0;

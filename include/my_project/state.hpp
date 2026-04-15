@@ -4,7 +4,7 @@
 
 namespace my_project {
 
-double minbee(double r);
+double minmod(double r);
 Vec pri2con(const Vec& w, double gamma);
 Vec con2pri(const Vec& u, double gamma);
 Vec phys_flux(const Vec& u, double gamma, bool glm_on, double ch);

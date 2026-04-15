@@ -50,7 +50,6 @@ void slic_step(ScratchBuf& sc, Row& wp, int n, double dt, double dx,
         for (int k = 0; k < NVAR; ++k) {
             d0[i][k] = uc[i][k] - uc[i - 1][k];
             d1[i][k] = uc[i + 1][k] - uc[i][k];
-            delta[i][k] = 0.5 * (d0[i][k] + d1[i][k]);
         }
     }
 
@@ -58,9 +57,9 @@ void slic_step(ScratchBuf& sc, Row& wp, int n, double dt, double dx,
         for (int k = 0; k < NVAR; ++k) {
             double den = d1[i][k];
             double r = (std::fabs(den) < 1e-30) ? 0.0 : d0[i][k] / den;
-            double phi = minbee(r);
-            xL[i][k] = uc[i][k] - 0.5 * phi * delta[i][k];
-            xR[i][k] = uc[i][k] + 0.5 * phi * delta[i][k];
+            double phi = minmod(r);
+            xL[i][k] = uc[i][k] - 0.5 * phi * d1[i][k];
+            xR[i][k] = uc[i][k] + 0.5 * phi * d1[i][k];
         }
         if (xL[i][0] < 0.0 || xR[i][0] < 0.0) {
             xL[i] = uc[i]; xR[i] = uc[i];
@@ -179,7 +178,7 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.x0 = -0.5; cfg.x1 = 0.5;
             cfg.y0 = 0.0;  cfg.y1 = static_cast<double>(ny) / nx;
             cfg.gamma = 5.0 / 3.0; cfg.t_end = 0.2;
-            cfg.bcx = BC::Transmissive; cfg.bcy = BC::Transmissive; break;
+            cfg.bcx = BC::Transmissive; cfg.bcy = BC::Transmissive; cfg.cfl = 0.8; break;
         case 6: // Brio & Wu (1988) shock tube, γ=5/3 (Miyoshi Fig. 8), t=0.1
             cfg.x0 = -0.5; cfg.x1 = 0.5;
             cfg.y0 = 0.0;  cfg.y1 = static_cast<double>(ny) / nx;
@@ -440,8 +439,8 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
                 // ---------------------------------------------------------------
                 case 5: {
                     // Dai & Woodward (1994) — Miyoshi Fig. 5
-                    // √(4π) = 3.54490770181103
-                    constexpr double sqrt4pi = 3.54490770181103;
+                    constexpr double pi = 3.14159265358979323846;
+                    const double sqrt4pi = std::sqrt(4.0 * pi);
                     Vec L = {1.08, 1.2,  0.01, 0.5, 0.95,
                              4.0/sqrt4pi, 3.6/sqrt4pi, 2.0/sqrt4pi, 0};
                     Vec R = {1.0,  0.0,  0.0,  0.0, 1.0,

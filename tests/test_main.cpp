@@ -24,11 +24,11 @@ int main() {
         require(std::fabs(w2[4] - w[4]) < 1e-12, "pressure roundtrip failed");
     }
 
-    // --- minbee limiter branches ---
+    // --- minmod limiter branches ---
     {
-        require(minbee(-1.0) == 0.0,                   "minbee negative branch failed");
-        require(std::fabs(minbee(0.5) - 0.5) < 1e-14, "minbee linear branch failed");
-        require(std::fabs(minbee(2.0) - 1.0) < 1e-14, "minbee saturated branch failed");
+        require(minmod(-1.0) == 0.0,                   "minmod negative branch failed");
+        require(std::fabs(minmod(0.5) - 0.5) < 1e-14, "minmod linear branch failed");
+        require(std::fabs(minmod(2.0) - 1.0) < 1e-14, "minmod saturated branch failed");
     }
 
     // --- GLM simulation sanity check ---
