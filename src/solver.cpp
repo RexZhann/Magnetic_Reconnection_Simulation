@@ -1,5 +1,6 @@
 #include "my_project/solver.hpp"
 
+#include "my_project/harris_sheet.hpp"
 #include "my_project/riemann.hpp"
 #include "my_project/state.hpp"
 
@@ -204,6 +205,21 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.y0 = 0.0;  cfg.y1 = static_cast<double>(ny) / nx;
             cfg.gamma = 5.0 / 3.0; cfg.t_end = 0.05;
             cfg.bcx = BC::Transmissive; cfg.bcy = BC::Transmissive; break;
+        case 11: { // Harris current sheet — magnetic reconnection
+            // Parameters and references: see include/my_project/harris_sheet.hpp
+            //   Equilibrium:   Harris (1962), Il Nuovo Cimento 23, 115
+            //   Domain/perturb: Birn et al. (2001), J. Geophys. Res. 106, 3715
+            //   MHD convention: Loureiro et al. (2007), Phys. Plasmas 14, 100703
+            const HarrisSheetParams hp;
+            cfg.x0    = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;  // x ∈ [-2π, 2π]
+            cfg.y0    = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;  // y ∈ [-π,  π]
+            cfg.gamma = 5.0 / 3.0;
+            cfg.t_end = 20.0;       // ≈ 1.6 Alfvén crossing times (Lx / vA∞)
+            cfg.bcx   = BC::Periodic;      // reconnected flux wraps around in x
+            cfg.bcy   = BC::Transmissive;  // outflow open boundary in y
+            cfg.eta   = hp.eta;            // S = Lx/η ≈ 2500 (Sweet-Parker 1958)
+            break;
+        }
         default:
             throw std::runtime_error("Unknown test id");
     }
@@ -483,6 +499,13 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
                     w[i][j] = (x < 0.0) ? L : R;
                     break;
                 }
+                case 11: {
+                    // Harris current-sheet reconnection
+                    // IC references: see include/my_project/harris_sheet.hpp
+                    //   Harris (1962) equilibrium + Birn et al. (2001) perturbation
+                    w[i][j] = harris_cell_ic(x, y, HarrisSheetParams{});
+                    break;
+                }
                 default:
                     throw std::runtime_error("Unknown test id");
             }
@@ -503,6 +526,7 @@ OutputData run_simulation(const RunConfig& cfg) {
     auto divb = make_divergence_controller(cfg.divb);
     divb->set_adiabatic_index(cfg.gamma);
     divb->set_boundary_conditions(cfg.bcx, cfg.bcy);
+    divb->set_resistivity(cfg.eta);
     divb->initialize(w, cfg, dx, dy);
 
     double t = 0.0;

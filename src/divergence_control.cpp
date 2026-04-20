@@ -1,4 +1,5 @@
 #include "my_project/divergence_control.hpp"
+#include "my_project/harris_sheet.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -50,6 +51,7 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
                                     double dt, double /*Lx*/, double /*Ly*/,
                                     double dx, double dy) {
     compute_corner_emf_from_interface_emfs(nx, ny);
+    add_resistive_correction(w, nx, ny, dt, dx, dy);  // no-op when eta_ == 0
     update_faces_from_emf(nx, ny, dt, dx, dy);
     sync_cell_centered_from_faces(w, nx, ny);
 
@@ -104,6 +106,12 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
                       return -std::sin(2.0*pi*y); }
             case 4: { constexpr double pi=3.14159265358979323846; (void)x;(void)y;
                       return 2.5/std::sqrt(4.0*pi); }
+            case 11: {
+                // Harris sheet: exact face Bx via vector-potential line integral
+                // bx = [Az(x, y+Δy/2) − Az(x, y−Δy/2)] / Δy
+                // Guarantees ∇·B = 0 to machine precision (Tóth 2000, §4.1).
+                return harris_bx_face(x, y, dy, HarrisSheetParams{});
+            }
             default: return std::numeric_limits<double>::quiet_NaN();
         }
     };
@@ -116,6 +124,12 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
             case 3: { constexpr double pi=3.14159265358979323846; (void)y;
                       return std::sin(4.0*pi*x); }
             case 4:  (void)x;(void)y; return 0.0;
+            case 11: {
+                // Harris sheet: exact face By via vector-potential line integral
+                // by = −[Az(x+Δx/2, y) − Az(x−Δx/2, y)] / Δx
+                // Guarantees ∇·B = 0 to machine precision (Tóth 2000, §4.1).
+                return harris_by_face(x, y, dx, HarrisSheetParams{});
+            }
             default: return std::numeric_limits<double>::quiet_NaN();
         }
     };
@@ -147,6 +161,92 @@ void CTDivergenceControl::fill_faces_from_cell_centered(const Grid& w, int nx, i
     for (int i = 0; i < nx; ++i)
         for (int j = 0; j < ny + 1; ++j)
             face_.by[i][j] = 0.5*(w[i+2][j+1][6] + w[i+2][j+2][6]);
+}
+
+// ---------------------------------------------------------------------------
+// Resistive MHD correction: add η·Jz to corner EMF and η·Jz² (Ohmic heating)
+// to cell thermal pressure.
+//
+// Discrete current at corner (I,J)  [Tóth 2000, §5.1]:
+//   Jz[I][J] = (By[I][J] − By[I−1][J]) / Δx  −  (Bx[I][J] − Bx[I][J−1]) / Δy
+// where By[I][J] = face_.by[I][J] (y-face to the right of corner),
+//       Bx[I][J] = face_.bx[I][J] (x-face above the corner).
+//
+// Resistive EMF (induction equation with resistivity):
+//   ∂B/∂t = ∇×(v×B) + η∇²B  ≡  −∇×E_ideal + ∇×(η J)
+//   E_z_total = E_z_ideal + η Jz          ← added to face_.emf_z here
+//
+// Ohmic heating (energy equation):
+//   ∂e_th/∂t += η Jz²   →   δp = (γ−1) η Jz_cell² δt
+//   where Jz_cell = average of 4 surrounding corner Jz values.
+//
+// Reference for CT + resistivity:
+//   Balsara, D.S., Spicer, D.S. (1999). "A staggered mesh algorithm using
+//   high order Godunov fluxes to ensure solenoidal magnetic fields in MHD
+//   simulations." J. Comput. Phys. 149, 270–292.  doi:10.1006/jcph.1998.6153
+//   (Section 4 — resistive extension of CT)
+// ---------------------------------------------------------------------------
+void CTDivergenceControl::add_resistive_correction(Grid& w, int nx, int ny,
+                                                   double dt, double dx, double dy) {
+    if (eta_ <= 0.0) return;
+
+    // -----------------------------------------------------------------------
+    // Step 1: Jz at every corner (I,J) from face-centred B (pre-Faraday).
+    // -----------------------------------------------------------------------
+    ScalarField Jz(nx + 1, std::vector<double>(ny + 1, 0.0));
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int I = 0; I <= nx; ++I) {
+        for (int J = 0; J <= ny; ++J) {
+            // --- ∂By/∂x: right and left y-faces adjacent to corner (I,J) ---
+            // face_.by[i][j] is the y-face at x=(i+0.5)dx, y=j·dy; i ∈ [0,nx−1]
+            double byR, byL;
+            if (bcx_ == BC::Periodic) {
+                // Periodic: corner I and corner nx are the same physical point.
+                int Ir = (I < nx) ? I      : 0;
+                int Il = (I > 0)  ? I - 1  : nx - 1;
+                byR = face_.by[Ir][J];
+                byL = face_.by[Il][J];
+            } else {
+                // Transmissive: clamp to interior (gives 0 at boundary corners).
+                byR = face_.by[(I < nx) ? I     : nx - 1][J];
+                byL = face_.by[(I > 0)  ? I - 1 : 0     ][J];
+            }
+
+            // --- ∂Bx/∂y: upper and lower x-faces adjacent to corner (I,J) ---
+            // face_.bx[i][j] is the x-face at x=i·dx, y=(j+0.5)dy; j ∈ [0,ny−1]
+            double bxU, bxD;
+            if (bcy_ == BC::Periodic) {
+                int Ju = (J < ny) ? J      : 0;
+                int Jd = (J > 0)  ? J - 1  : ny - 1;
+                bxU = face_.bx[I][Ju];
+                bxD = face_.bx[I][Jd];
+            } else {
+                bxU = face_.bx[I][(J < ny) ? J     : ny - 1];
+                bxD = face_.bx[I][(J > 0)  ? J - 1 : 0     ];
+            }
+
+            Jz[I][J] = (byR - byL) / dx - (bxU - bxD) / dy;
+
+            // Add resistive contribution to the corner EMF that will be used
+            // by update_faces_from_emf for the Faraday update.
+            face_.emf_z[I][J] += eta_ * Jz[I][J];
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 2: Ohmic heating — add (γ−1) η Jz_cell² dt to cell pressure.
+    //   Jz at cell centre (i,j) = mean of 4 surrounding corner values.
+    //   The pressure update is consistent with the Ohmic term in the
+    //   total-energy equation:  ∂E/∂t += η Jz²  →  ∂p/∂t += (γ−1) η Jz².
+    // -----------------------------------------------------------------------
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int i = 0; i < nx; ++i) {
+        for (int j = 0; j < ny; ++j) {
+            double Jc = 0.25 * (Jz[i][j] + Jz[i+1][j] + Jz[i][j+1] + Jz[i+1][j+1]);
+            w[i + 2][j + 2][4] += (gamma_ - 1.0) * eta_ * Jc * Jc * dt;
+        }
+    }
 }
 
 // Corner EMF by arithmetic average of the four surrounding interface EMFs.

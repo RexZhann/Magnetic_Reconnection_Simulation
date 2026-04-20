@@ -43,6 +43,11 @@ struct RunConfig {
     BC bcy = BC::Transmissive;
     SolverKind solver = SolverKind::HLLD;
     DivBCleaningKind divb = DivBCleaningKind::GLM;
+    // Uniform resistivity η for resistive MHD (0 = ideal MHD).
+    // Only active for CT divergence control; explicit stability requires
+    // η ≤ min(dx,dy)² / (2 dt), which is automatically satisfied when
+    // the ideal-MHD CFL condition is the tighter constraint.
+    double eta = 0.0;
 };
 
 struct Diagnostics {

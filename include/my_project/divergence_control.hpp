@@ -22,6 +22,10 @@ public:
     // correct face-B BC and periodic EMF wrapping.
     virtual void set_boundary_conditions(BC /*bcx*/, BC /*bcy*/) {}
 
+    // Set uniform resistivity η for resistive MHD.  Default 0 (ideal MHD).
+    // Only the CT controller uses this; all others silently ignore it.
+    virtual void set_resistivity(double /*eta*/) {}
+
     // CT interface: fill a contiguous buffer with the face-centered normal B
     // for a 1D sweep row/column. buf must have size >= n+2.
     // For x-sweep of interior row j (0-indexed): buf[i] = Bx_face at interface i (i=1..n+1).
@@ -78,6 +82,7 @@ public:
     double characteristic_speed() const override { return ch_like_; }
     void set_adiabatic_index(double gamma) override { gamma_ = gamma; }
     void set_boundary_conditions(BC bcx, BC bcy) override { bcx_ = bcx; bcy_ = bcy; }
+    void set_resistivity(double eta) override { eta_ = eta; }
     void initialize(Grid& w, const RunConfig& cfg, double dx, double dy) override;
     void pre_step(Grid& w, int nx, int ny, double dt, double dx, double dy) override;
     void post_step(Grid& w, int nx, int ny, double dt, double Lx, double Ly,
@@ -99,12 +104,18 @@ private:
     int nx_ = 0, ny_ = 0;
     double ch_like_ = 0.0;
     double gamma_ = 1.4;
+    double eta_   = 0.0;
     BC bcx_ = BC::Transmissive;
     BC bcy_ = BC::Transmissive;
 
     void initialize_faces_from_problem(const Grid& w, const RunConfig& cfg, double dx, double dy);
     void fill_faces_from_cell_centered(const Grid& w, int nx, int ny);
     void compute_corner_emf_from_interface_emfs(int nx, int ny);
+    // Add η·Jz to every corner EMF and η·Jz² (as Ohmic heating) to cell pressure.
+    // Called after compute_corner_emf_from_interface_emfs, before update_faces_from_emf.
+    // No-op when eta_ == 0 (ideal MHD).
+    void add_resistive_correction(Grid& w, int nx, int ny,
+                                  double dt, double dx, double dy);
     void update_faces_from_emf(int nx, int ny, double dt, double dx, double dy);
     void sync_cell_centered_from_faces(Grid& w, int nx, int ny) const;
     void apply_face_bc(int nx, int ny);
