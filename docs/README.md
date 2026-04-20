@@ -30,7 +30,7 @@ C:\TDM-GCC-64\bin\g++.exe -O3 -std=c++17 -fopenmp -Iinclude tests\test_main.cpp 
 ```
 
 Compatible with the original command line:
-- `test`: 0=CylExplosion, 1=BrioWu-x, 2=BrioWu-y, 3=OrszagTang, 4=Rotor
+- `test`: 0=CylExplosion, 1=BrioWu-x, 2=BrioWu-y, 3=OrszagTang, 4=Rotor, 5-10 = tests in Myoshi&Kusano(2005)
 - `glm`: 0=None, 1=GLM, 2=CT
 - `solver`: 0=FORCE, 1=HLLD
 
