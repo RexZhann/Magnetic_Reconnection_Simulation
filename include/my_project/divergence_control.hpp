@@ -26,6 +26,10 @@ public:
     // Only the CT controller uses this; all others silently ignore it.
     virtual void set_resistivity(double /*eta*/) {}
 
+    // Set ion inertial length d_i for Hall MHD.  Default 0 (no Hall term).
+    // Only the CT controller uses this; all others silently ignore it.
+    virtual void set_hall(double /*di*/) {}
+
     // CT interface: fill a contiguous buffer with the face-centered normal B
     // for a 1D sweep row/column. buf must have size >= n+2.
     // For x-sweep of interior row j (0-indexed): buf[i] = Bx_face at interface i (i=1..n+1).
@@ -83,6 +87,7 @@ public:
     void set_adiabatic_index(double gamma) override { gamma_ = gamma; }
     void set_boundary_conditions(BC bcx, BC bcy) override { bcx_ = bcx; bcy_ = bcy; }
     void set_resistivity(double eta) override { eta_ = eta; }
+    void set_hall(double di) override { hall_di_ = di; }
     void initialize(Grid& w, const RunConfig& cfg, double dx, double dy) override;
     void pre_step(Grid& w, int nx, int ny, double dt, double dx, double dy) override;
     void post_step(Grid& w, int nx, int ny, double dt, double Lx, double Ly,
@@ -103,8 +108,9 @@ private:
     ScalarField emf_y_;
     int nx_ = 0, ny_ = 0;
     double ch_like_ = 0.0;
-    double gamma_ = 1.4;
-    double eta_   = 0.0;
+    double gamma_   = 1.4;
+    double eta_     = 0.0;
+    double hall_di_ = 0.0;
     BC bcx_ = BC::Transmissive;
     BC bcy_ = BC::Transmissive;
 
@@ -116,6 +122,14 @@ private:
     // No-op when eta_ == 0 (ideal MHD).
     void add_resistive_correction(Grid& w, int nx, int ny,
                                   double dt, double dx, double dy);
+
+    // Add Hall term (d_i/ρ) J × B to the induction equation:
+    //   1. Adds E_z^Hall = (d_i/ρ)(J_x B_y - J_y B_x) to corner EMF (→ drives Bx, By).
+    //   2. Updates cell-centred Bz via ∂Bz/∂t = ∂E_x^Hall/∂y - ∂E_y^Hall/∂x.
+    // Must be called after add_resistive_correction, before update_faces_from_emf.
+    // No-op when hall_di_ == 0.
+    void add_hall_correction(Grid& w, int nx, int ny,
+                             double dt, double dx, double dy);
     void update_faces_from_emf(int nx, int ny, double dt, double dx, double dy);
     void sync_cell_centered_from_faces(Grid& w, int nx, int ny) const;
     void apply_face_bc(int nx, int ny);

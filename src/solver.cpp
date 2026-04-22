@@ -12,6 +12,7 @@
 #include <iostream>
 #include <memory>
 #include <omp.h>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -205,19 +206,36 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.y0 = 0.0;  cfg.y1 = static_cast<double>(ny) / nx;
             cfg.gamma = 5.0 / 3.0; cfg.t_end = 0.05;
             cfg.bcx = BC::Transmissive; cfg.bcy = BC::Transmissive; break;
-        case 11: { // Harris current sheet — magnetic reconnection
+        case 11: { // Harris current sheet — resistive MHD reconnection
             // Parameters and references: see include/my_project/harris_sheet.hpp
             //   Equilibrium:   Harris (1962), Il Nuovo Cimento 23, 115
             //   Domain/perturb: Birn et al. (2001), J. Geophys. Res. 106, 3715
             //   MHD convention: Loureiro et al. (2007), Phys. Plasmas 14, 100703
             const HarrisSheetParams hp;
-            cfg.x0    = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;  // x ∈ [-2π, 2π]
-            cfg.y0    = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;  // y ∈ [-π,  π]
-            cfg.gamma = 5.0 / 3.0;
-            cfg.t_end = 20.0;       // ≈ 1.6 Alfvén crossing times (Lx / vA∞)
-            cfg.bcx   = BC::Periodic;      // reconnected flux wraps around in x
-            cfg.bcy   = BC::Transmissive;  // outflow open boundary in y
-            cfg.eta   = hp.eta;            // S = Lx/η ≈ 2500 (Sweet-Parker 1958)
+            cfg.x0       = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;  // x ∈ [-2π, 2π]
+            cfg.y0       = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;  // y ∈ [-π,  π]
+            cfg.gamma    = 5.0 / 3.0;
+            cfg.t_end    = 50.0;       // ≈ 1.6 Alfvén crossing times (Lx / vA∞)
+            cfg.bcx      = BC::Periodic;      // reconnected flux wraps around in x
+            cfg.bcy      = BC::Transmissive;  // outflow open boundary in y
+            cfg.eta      = hp.eta;            // S = Lx/η ≈ 2500 (Sweet-Parker 1958)
+            cfg.output_dt = 1.0;              // write snapshots at t=0,1,...
+            break;
+        }
+        case 12: { // Harris current sheet — Hall MHD reconnection (GEM challenge)
+            // Same equilibrium and domain as test 11; adds Hall term d_i/ρ J×B.
+            // GEM parameters: Birn et al. (2001), J. Geophys. Res. 106, 3715
+            //   d_i = 1.0 (ion inertial length ≈ 2λ; speeds reconnection ~10×)
+            const HarrisSheetParams hp;
+            cfg.x0       = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
+            cfg.y0       = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
+            cfg.gamma    = 5.0 / 3.0;
+            cfg.t_end    = 30.0;       // Hall reconnection is much faster; 30 is enough
+            cfg.bcx      = BC::Periodic;
+            cfg.bcy      = BC::Transmissive;
+            cfg.eta      = hp.eta;            // same resistivity as resistive MHD run
+            cfg.hall_di  = 1.0;               // GEM challenge: d_i = 1.0 (= 2λ)
+            cfg.output_dt = 1.0;
             break;
         }
         default:
@@ -318,8 +336,8 @@ void sweep_y(Grid& w, int nx, int ny, double dt, double dy, const RunConfig& cfg
 
 double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
                   const RunConfig& cfg, DivergenceController& divb) {
-    double smax = 1e-10, ch_loc = 0.0;
-    #pragma omp parallel for collapse(2) reduction(max:smax,ch_loc) schedule(static)
+    double smax = 1e-10, ch_loc = 0.0, max_va2 = 0.0;
+    #pragma omp parallel for collapse(2) reduction(max:smax,ch_loc,max_va2) schedule(static)
     for (int i = 2; i < nx + 2; ++i) {
         for (int j = 2; j < ny + 2; ++j) {
             const Vec& p = w[i][j];
@@ -330,9 +348,19 @@ double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
             double s = sx / dx + sy / dy;
             smax = std::max(smax, s);
             ch_loc = std::max(ch_loc, std::max(sx, sy));
+            // Track max Alfvén speed for Hall CFL: v_A = |B|/sqrt(ρ)
+            double B2 = p[5]*p[5] + p[6]*p[6] + p[7]*p[7];
+            max_va2 = std::max(max_va2, B2 / std::max(p[0], 1e-14));
         }
     }
     divb.update_characteristic_speed(ch_loc);
+    // Hall whistler CFL: dt ≤ min(dx,dy)² / (d_i · v_A)
+    // Equivalent smax contribution: d_i · v_A / min(dx,dy)²
+    if (cfg.hall_di > 0.0) {
+        double mincell = std::min(dx, dy);
+        double smax_hall = cfg.hall_di * std::sqrt(max_va2) / (mincell * mincell);
+        smax = std::max(smax, smax_hall);
+    }
     return cfg.cfl / smax;
 }
 
@@ -499,10 +527,11 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
                     w[i][j] = (x < 0.0) ? L : R;
                     break;
                 }
-                case 11: {
+                case 11: case 12: {
                     // Harris current-sheet reconnection
                     // IC references: see include/my_project/harris_sheet.hpp
                     //   Harris (1962) equilibrium + Birn et al. (2001) perturbation
+                    // Test 12 = Hall MHD; same IC, Hall term added in post_step.
                     w[i][j] = harris_cell_ic(x, y, HarrisSheetParams{});
                     break;
                 }
@@ -527,12 +556,23 @@ OutputData run_simulation(const RunConfig& cfg) {
     divb->set_adiabatic_index(cfg.gamma);
     divb->set_boundary_conditions(cfg.bcx, cfg.bcy);
     divb->set_resistivity(cfg.eta);
+    divb->set_hall(cfg.hall_di);
     divb->initialize(w, cfg, dx, dy);
 
     double t = 0.0;
     int step = 0;
     double t_sweepx = 0.0, t_sweepy = 0.0, t_other = 0.0;
     auto T0 = Clock::now();
+
+    // Snapshot output: write at t=0, then every output_dt.
+    const bool do_snaps = cfg.output_dt > 0.0;
+    int snap_idx = 0;
+    double next_snap_t = cfg.output_dt;
+    if (do_snaps) {
+        auto dB0 = compute_divB(w, cfg.nx, cfg.ny, dx, dy, divb->face_field());
+        write_snapshot_file(w, dB0, cfg, snap_idx++, 0.0);
+        std::cout << "Snapshot 0 written (t=0)\n";
+    }
 
     while (t < cfg.t_end) {
         auto ta = Clock::now();
@@ -560,6 +600,13 @@ OutputData run_simulation(const RunConfig& cfg) {
         t_other += elapsed(ta, tb) + elapsed(te, tf);
         t += dt;
         ++step;
+
+        if (do_snaps && t >= next_snap_t - 1e-12 * cfg.output_dt) {
+            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+            auto dB_snap = compute_divB(w, cfg.nx, cfg.ny, dx, dy, divb->face_field());
+            write_snapshot_file(w, dB_snap, cfg, snap_idx++, t);
+            next_snap_t += cfg.output_dt;
+        }
 
         if (step % 200 == 0) {
             apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
@@ -599,6 +646,33 @@ OutputData run_simulation(const RunConfig& cfg) {
         out.face_field = *ff;
     }
     return out;
+}
+
+void write_snapshot_file(const Grid& w,
+                         const std::vector<std::vector<double>>& divB,
+                         const RunConfig& cfg, int snap_idx, double t) {
+    const double dx = (cfg.x1 - cfg.x0) / cfg.nx;
+    const double dy = (cfg.y1 - cfg.y0) / cfg.ny;
+    std::ostringstream ss;
+    ss << "output/test" << cfg.test << "_"
+       << cfg.nx << "x" << cfg.ny
+       << solver_suffix(cfg.solver) << divb_suffix(cfg.divb)
+       << "_snap" << std::setw(3) << std::setfill('0') << snap_idx << ".dat";
+    std::ofstream file(ss.str());
+    // Header has 5 fields (nx ny gamma glm t) so Python can recover simulation time.
+    file << cfg.nx << ' ' << cfg.ny << ' ' << cfg.gamma << ' '
+         << (cfg.divb == DivBCleaningKind::GLM ? 1 : 0) << ' ' << t << '\n';
+    for (int j = 2; j < cfg.ny + 2; ++j) {
+        for (int i = 2; i < cfg.nx + 2; ++i) {
+            double x = cfg.x0 + (i - 1.5) * dx;
+            double y = cfg.y0 + (j - 1.5) * dy;
+            const Vec& p = w[i][j];
+            double e = p[4] / ((cfg.gamma - 1.0) * p[0]);
+            file << x << ' ' << y;
+            for (int k = 0; k < NVAR; ++k) file << ' ' << p[k];
+            file << ' ' << e << ' ' << divB[i - 2][j - 2] << '\n';
+        }
+    }
 }
 
 void write_output_file(const OutputData& out, const RunConfig& cfg) {

@@ -48,6 +48,18 @@ struct RunConfig {
     // η ≤ min(dx,dy)² / (2 dt), which is automatically satisfied when
     // the ideal-MHD CFL condition is the tighter constraint.
     double eta = 0.0;
+
+    // Ion inertial length d_i = c/ω_pi for Hall MHD (0 = resistive/ideal MHD).
+    // Adds the Hall term (d_i/ρ) J × B to the induction equation.
+    // Only active in CT mode.  Explicit Hall CFL: dt ≤ min(dx,dy)²/(d_i·v_A)
+    // is enforced automatically by compute_dt.
+    double hall_di = 0.0;
+
+    // Snapshot output interval [simulation time units].
+    // 0 = write only the final state (default).
+    // >0 = also write snap000.dat, snap001.dat, ... at every output_dt interval
+    // starting from t=0.  Useful for animation and time-series diagnostics.
+    double output_dt = 0.0;
 };
 
 struct Diagnostics {

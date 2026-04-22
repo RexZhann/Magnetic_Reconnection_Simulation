@@ -36,6 +36,12 @@ Diagnostics compute_diagnostics(const Grid& w, int nx, int ny,
 void initialize_problem(Grid& w, const RunConfig& cfg);
 OutputData run_simulation(const RunConfig& cfg);
 void write_output_file(const OutputData& out, const RunConfig& cfg);
+// Write a single time snapshot (used internally by run_simulation when
+// cfg.output_dt > 0).  The file header contains an extra 't' field so that
+// the Python loader can recover the simulation time from each file.
+void write_snapshot_file(const Grid& w,
+                         const std::vector<std::vector<double>>& divB,
+                         const RunConfig& cfg, int snap_idx, double t);
 std::unique_ptr<DivergenceController> make_divergence_controller(DivBCleaningKind kind);
 
 } // namespace my_project

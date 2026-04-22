@@ -52,6 +52,7 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
                                     double dx, double dy) {
     compute_corner_emf_from_interface_emfs(nx, ny);
     add_resistive_correction(w, nx, ny, dt, dx, dy);  // no-op when eta_ == 0
+    add_hall_correction(w, nx, ny, dt, dx, dy);        // no-op when hall_di_ == 0
     update_faces_from_emf(nx, ny, dt, dx, dy);
     sync_cell_centered_from_faces(w, nx, ny);
 
@@ -106,7 +107,7 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
                       return -std::sin(2.0*pi*y); }
             case 4: { constexpr double pi=3.14159265358979323846; (void)x;(void)y;
                       return 2.5/std::sqrt(4.0*pi); }
-            case 11: {
+            case 11: case 12: {
                 // Harris sheet: exact face Bx via vector-potential line integral
                 // bx = [Az(x, y+Δy/2) − Az(x, y−Δy/2)] / Δy
                 // Guarantees ∇·B = 0 to machine precision (Tóth 2000, §4.1).
@@ -124,7 +125,7 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
             case 3: { constexpr double pi=3.14159265358979323846; (void)y;
                       return std::sin(4.0*pi*x); }
             case 4:  (void)x;(void)y; return 0.0;
-            case 11: {
+            case 11: case 12: {
                 // Harris sheet: exact face By via vector-potential line integral
                 // by = −[Az(x+Δx/2, y) − Az(x−Δx/2, y)] / Δx
                 // Guarantees ∇·B = 0 to machine precision (Tóth 2000, §4.1).
@@ -346,6 +347,171 @@ void CTDivergenceControl::apply_face_bc(int nx, int ny) {
         for (int i = 0; i < nx; ++i) {
             face_.by[i][0]  = face_.by[i][1];
             face_.by[i][ny] = face_.by[i][ny-1];
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hall MHD correction: ∂B/∂t|_Hall = -∇ × [(d_i/ρ) J × B]
+//
+// The Hall EMF is E^Hall = (d_i/ρ) J × B.  In 2.5-D (∂/∂z = 0):
+//   J_x = ∂Bz/∂y,   J_y = -∂Bz/∂x,   J_z = ∂By/∂x - ∂Bx/∂y
+//
+// Step 1: Corner E_z^Hall = (d_i/ρ)(J_x B_y - J_y B_x) → added to face_.emf_z
+//         so the subsequent CT Faraday step advances Bx and By correctly.
+//
+// Step 2: Update cell-centred Bz using the finite-volume discretisation
+//   ΔBz[i][j] = dt × [(Ex^H[i][j+1] - Ex^H[i][j]) / dy
+//                    - (Ey^H[i+1][j] - Ey^H[i][j]) / dx]
+//   with
+//   Ex^H at y-face (i,J) = (d_i/ρ)(J_y Bz - J_z By)
+//   Ey^H at x-face (I,j) = (d_i/ρ)(J_z Bx - J_x Bz)
+//
+// Stability: Hall whistler CFL dt ≤ min(dx,dy)² / (d_i·v_A) is enforced in
+// compute_dt, so no sub-cycling is needed here.
+//
+// Reference: Tóth et al. (2008) J. Comput. Phys. 227, 6967-6984, §3.
+// ---------------------------------------------------------------------------
+void CTDivergenceControl::add_hall_correction(Grid& w, int nx, int ny,
+                                              double dt, double dx, double dy) {
+    if (hall_di_ <= 0.0) return;
+
+    // -----------------------------------------------------------------------
+    // Precompute corner current components  (I=0..nx, J=0..ny)
+    //
+    // Interior cell (i,j) [0-indexed] sits at padded position w[i+2][j+2].
+    // Corner (I,J) at x=I·dx, y=J·dy is surrounded by four cells
+    //   (I-1,J-1),(I,J-1),(I-1,J),(I,J) → padded w[I+1][J+1], w[I+2][J+1],
+    //                                              w[I+1][J+2], w[I+2][J+2]
+    // Ghost cells (index 0, 1, nx+2, nx+3 etc.) are already filled by
+    // apply_bc before post_step is called, so boundary corners are correct.
+    // -----------------------------------------------------------------------
+    ScalarField Jx_c(nx + 1, std::vector<double>(ny + 1, 0.0));
+    ScalarField Jy_c(nx + 1, std::vector<double>(ny + 1, 0.0));
+    ScalarField Jz_c(nx + 1, std::vector<double>(ny + 1, 0.0));
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int I = 0; I <= nx; ++I) {
+        for (int J = 0; J <= ny; ++J) {
+            // Jz from face B (BC-aware, matches add_resistive_correction)
+            double byR, byL, bxU, bxD;
+            if (bcx_ == BC::Periodic) {
+                byR = face_.by[(I < nx) ? I      : 0     ][J];
+                byL = face_.by[(I > 0)  ? I - 1  : nx - 1][J];
+            } else {
+                byR = face_.by[(I < nx) ? I     : nx - 1][J];
+                byL = face_.by[(I > 0)  ? I - 1 : 0     ][J];
+            }
+            if (bcy_ == BC::Periodic) {
+                bxU = face_.bx[I][(J < ny) ? J      : 0     ];
+                bxD = face_.bx[I][(J > 0)  ? J - 1  : ny - 1];
+            } else {
+                bxU = face_.bx[I][(J < ny) ? J     : ny - 1];
+                bxD = face_.bx[I][(J > 0)  ? J - 1 : 0     ];
+            }
+            Jz_c[I][J] = (byR - byL) / dx - (bxU - bxD) / dy;
+
+            // Jx = ∂Bz/∂y at corner: average Bz of cells above minus below, / dy
+            double Bz_up   = 0.5 * (w[I+1][J+2][7] + w[I+2][J+2][7]);
+            double Bz_down = 0.5 * (w[I+1][J+1][7] + w[I+2][J+1][7]);
+            Jx_c[I][J] = (Bz_up - Bz_down) / dy;
+
+            // Jy = -∂Bz/∂x at corner: -(Bz_right - Bz_left) / dx
+            double Bz_right = 0.5 * (w[I+2][J+1][7] + w[I+2][J+2][7]);
+            double Bz_left  = 0.5 * (w[I+1][J+1][7] + w[I+1][J+2][7]);
+            Jy_c[I][J] = -(Bz_right - Bz_left) / dx;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 1: Add E_z^Hall to corner EMF → drives Bx, By via Faraday
+    // -----------------------------------------------------------------------
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int I = 0; I <= nx; ++I) {
+        for (int J = 0; J <= ny; ++J) {
+            double rho_c = 0.25 * (w[I+1][J+1][0] + w[I+2][J+1][0] +
+                                   w[I+1][J+2][0] + w[I+2][J+2][0]);
+            rho_c = std::max(rho_c, 1e-12);
+
+            // Bx at corner: average adjacent x-faces
+            double bxD2, bxU2;
+            if (bcy_ == BC::Periodic) {
+                bxU2 = face_.bx[I][(J < ny) ? J      : 0     ];
+                bxD2 = face_.bx[I][(J > 0)  ? J - 1  : ny - 1];
+            } else {
+                bxU2 = face_.bx[I][(J < ny) ? J     : ny - 1];
+                bxD2 = face_.bx[I][(J > 0)  ? J - 1 : 0     ];
+            }
+            double Bx_c = 0.5 * (bxD2 + bxU2);
+
+            // By at corner: average adjacent y-faces
+            double byL2, byR2;
+            if (bcx_ == BC::Periodic) {
+                byR2 = face_.by[(I < nx) ? I      : 0     ][J];
+                byL2 = face_.by[(I > 0)  ? I - 1  : nx - 1][J];
+            } else {
+                byR2 = face_.by[(I < nx) ? I     : nx - 1][J];
+                byL2 = face_.by[(I > 0)  ? I - 1 : 0     ][J];
+            }
+            double By_c = 0.5 * (byL2 + byR2);
+
+            face_.emf_z[I][J] += (hall_di_ / rho_c)
+                                  * (Jx_c[I][J] * By_c - Jy_c[I][J] * Bx_c);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 2: Update cell-centred Bz via Hall Ex and Ey
+    //
+    // Ex^Hall at y-face (i, J): x=(i+0.5)dx, y=J·dy
+    //   = (d_i/ρ)(J_y Bz - J_z By)
+    //   By = face_.by[i][J]  (exact, stored at this face)
+    //   ρ, Bz averaged from cells below (i,J-1) and above (i,J)
+    //   J_y, J_z averaged from corners (i,J) and (i+1,J)
+    //
+    // Ey^Hall at x-face (I, j): x=I·dx, y=(j+0.5)dy
+    //   = (d_i/ρ)(J_z Bx - J_x Bz)
+    //   Bx = face_.bx[I][j]  (exact, stored at this face)
+    //   ρ, Bz averaged from cells left (I-1,j) and right (I,j)
+    //   J_x, J_z averaged from corners (I,j) and (I,j+1)
+    // -----------------------------------------------------------------------
+    ScalarField ExH(nx,     std::vector<double>(ny + 1, 0.0));  // [i][J]  i∈[0,nx-1], J∈[0,ny]
+    ScalarField EyH(nx + 1, std::vector<double>(ny,     0.0));  // [I][j]  I∈[0,nx],   j∈[0,ny-1]
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int i = 0; i < nx; ++i) {
+        for (int J = 0; J <= ny; ++J) {
+            // cells below (i,J-1) → padded w[i+2][J+1], above (i,J) → w[i+2][J+2]
+            double rho_f = 0.5 * (w[i+2][J+1][0] + w[i+2][J+2][0]);
+            rho_f = std::max(rho_f, 1e-12);
+            double Bz_f  = 0.5 * (w[i+2][J+1][7] + w[i+2][J+2][7]);
+            double By_f  = face_.by[i][J];
+            double Jy_f  = 0.5 * (Jy_c[i][J] + Jy_c[i+1][J]);
+            double Jz_f  = 0.5 * (Jz_c[i][J] + Jz_c[i+1][J]);
+            ExH[i][J] = (hall_di_ / rho_f) * (Jy_f * Bz_f - Jz_f * By_f);
+        }
+    }
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int I = 0; I <= nx; ++I) {
+        for (int j = 0; j < ny; ++j) {
+            // cells left (I-1,j) → padded w[I+1][j+2], right (I,j) → w[I+2][j+2]
+            double rho_f = 0.5 * (w[I+1][j+2][0] + w[I+2][j+2][0]);
+            rho_f = std::max(rho_f, 1e-12);
+            double Bz_f  = 0.5 * (w[I+1][j+2][7] + w[I+2][j+2][7]);
+            double Bx_f  = face_.bx[I][j];
+            double Jx_f  = 0.5 * (Jx_c[I][j] + Jx_c[I][j+1]);
+            double Jz_f  = 0.5 * (Jz_c[I][j] + Jz_c[I][j+1]);
+            EyH[I][j] = (hall_di_ / rho_f) * (Jz_f * Bx_f - Jx_f * Bz_f);
+        }
+    }
+
+    // ΔBz[i][j] = dt·[(ExH[i][j+1] - ExH[i][j])/dy - (EyH[i+1][j] - EyH[i][j])/dx]
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int i = 0; i < nx; ++i) {
+        for (int j = 0; j < ny; ++j) {
+            w[i+2][j+2][7] += dt * ((ExH[i][j+1] - ExH[i][j]) / dy
+                                   - (EyH[i+1][j] - EyH[i][j]) / dx);
         }
     }
 }

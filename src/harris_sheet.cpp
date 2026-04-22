@@ -27,7 +27,7 @@ RunConfig make_harris_config(int nx, int ny,
     cfg.nx     = nx;
     cfg.ny     = ny;
     cfg.gamma  = 5.0 / 3.0;     // standard for space / laboratory plasmas [L07]
-    cfg.t_end  = 20.0;           // ≈ 1.6 τA∞ (Alfvén crossing times based on Lx)
+    cfg.t_end  = 50.0;           // ≈ 1.6 τA∞ (Alfvén crossing times based on Lx)
     cfg.cfl    = (solver == SolverKind::FORCE) ? 0.4 : 0.3;
     cfg.solver = solver;
     cfg.divb   = divb;
