@@ -238,6 +238,14 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.output_dt = 1.0;
             break;
         }
+        case 13: { // Circularly polarised Alfvén wave — Tóth (2000) §5.1 convergence test
+            // 1D periodic domain [0,1]; va = B0/sqrt(rho0) = 1, so t_end=1 is one
+            // Alfvén crossing time and the solution returns to its exact initial state.
+            cfg.x0 = 0.0; cfg.x1 = 1.0;
+            cfg.y0 = 0.0; cfg.y1 = static_cast<double>(ny) / nx;
+            cfg.gamma = 5.0 / 3.0; cfg.t_end = 1.0;
+            cfg.bcx = BC::Periodic; cfg.bcy = BC::Transmissive; break;
+        }
         default:
             throw std::runtime_error("Unknown test id");
     }
@@ -533,6 +541,25 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
                     //   Harris (1962) equilibrium + Birn et al. (2001) perturbation
                     // Test 12 = Hall MHD; same IC, Hall term added in post_step.
                     w[i][j] = harris_cell_ic(x, y, HarrisSheetParams{});
+                    break;
+                }
+                case 13: {
+                    // Circularly polarised Alfvén wave — convergence test
+                    // following Tóth (2000) §5.1
+                    constexpr double pi = 3.14159265358979323846;
+                    const double k  = 2.0 * pi;          // wavenumber
+                    const double B0 = 1.0, rho0 = 1.0;
+                    const double va = B0 / std::sqrt(rho0);
+                    const double Bperp = 0.1 * B0;       // small-amplitude
+                    w[i][j] = { rho0,
+                                0.0,
+                               -va * Bperp * std::sin(k * x) / B0,
+                                va * Bperp * std::cos(k * x) / B0,
+                                0.1,                     // thermal pressure
+                                B0,
+                                Bperp * std::sin(k * x),
+                               -Bperp * std::cos(k * x),
+                                0.0 };
                     break;
                 }
                 default:
