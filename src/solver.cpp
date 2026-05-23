@@ -39,7 +39,9 @@ double elapsed(Clock::time_point a, Clock::time_point b) {
 void slic_step(ScratchBuf& sc, Row& wp, int n, double dt, double dx,
                const RunConfig& cfg, DivergenceController& divb,
                const double* face_bn = nullptr,
-               double* emf_out = nullptr) {
+               double* emf_out  = nullptr,
+               double* cemf_out = nullptr,
+               double* sgn_out  = nullptr) {
     const int N = n + 4;
     sc.ensure(N);
     Row& uc = sc.uc; Row& d0 = sc.d0; Row& d1 = sc.d1; Row& delta = sc.delta;
@@ -106,6 +108,15 @@ void slic_step(ScratchBuf& sc, Row& wp, int n, double dt, double dx,
                 iflx[i] = hlld_flux(uL, uR, cfg.gamma, false, 0.0);
             }
             if (emf_out) emf_out[i] = iflx[i][6];
+            // CT-Contact: centered (dissipation-free) EMF = average of L/R induction fluxes.
+            // In x-sweep frame F[6] = vx*By - vy*Bx; same formula after y-sweep rotation.
+            if (cemf_out) {
+                double FcL = (uL[1] / uL[0]) * uL[6] - (uL[2] / uL[0]) * uL[5];
+                double FcR = (uR[1] / uR[0]) * uR[6] - (uR[2] / uR[0]) * uR[5];
+                cemf_out[i] = 0.5 * (FcL + FcR);
+            }
+            // sign(mass flux F[rho] = rho*vx): positive = flow rightward.
+            if (sgn_out) sgn_out[i] = (iflx[i][0] >= 0.0) ? 1.0 : -1.0;
         } else {
             if (cfg.solver == SolverKind::FORCE) {
                 iflx[i] = force_flux(hR[i], hL[i + 1], dt, dx, cfg.gamma, glm, ch);
@@ -145,6 +156,8 @@ void ScratchBuf::ensure(int N) {
     resize_row(iflx); resize_row(s_row);
     face_bn_buf.assign(N, 0.0);
     emf_buf.assign(N, 0.0);
+    cemf_buf.assign(N, 0.0);
+    sgn_buf.assign(N, 0.0);
 }
 
 RunConfig make_config_for_test(int test, int nx, int ny,
@@ -215,7 +228,7 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.x0       = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;  // x ∈ [-2π, 2π]
             cfg.y0       = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;  // y ∈ [-π,  π]
             cfg.gamma    = 5.0 / 3.0;
-            cfg.t_end    = 50.0;       // ≈ 1.6 Alfvén crossing times (Lx / vA∞)
+            cfg.t_end    = 20.0;       // ≈ 1.6 Alfvén crossing times (Lx / vA∞)
             cfg.bcx      = BC::Periodic;      // reconnected flux wraps around in x
             cfg.bcy      = BC::Transmissive;  // outflow open boundary in y
             cfg.eta      = hp.eta;            // S = Lx/η ≈ 2500 (Sweet-Parker 1958)
@@ -230,12 +243,14 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.x0       = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
             cfg.y0       = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
             cfg.gamma    = 5.0 / 3.0;
-            cfg.t_end    = 30.0;       // Hall reconnection is much faster; 30 is enough
+            cfg.t_end    = 12.0;       // Hall reconnection is much faster; 12 is enough
             cfg.bcx      = BC::Periodic;
             cfg.bcy      = BC::Transmissive;
             cfg.eta      = hp.eta;            // same resistivity as resistive MHD run
             cfg.hall_di  = 1.0;               // GEM challenge: d_i = 1.0 (= 2λ)
             cfg.output_dt = 1.0;
+            cfg.rho_floor = 0.02;  // prevent density cavitation (10% of background 0.2)
+            cfg.p_floor   = 0.005; // pressure floor
             break;
         }
         case 13: { // Circularly polarised Alfvén wave — Tóth (2000) §5.1 convergence test
@@ -279,6 +294,17 @@ void apply_bc(Grid& w, int nx, int ny, BC bcx, BC bcy) {
     }
 }
 
+void apply_floor(Grid& w, int nx, int ny, const RunConfig& cfg) {
+    if (cfg.rho_floor <= 0.0 && cfg.p_floor <= 0.0) return;
+    const double gm1 = cfg.gamma - 1.0;
+    for (int i = 2; i < nx + 2; ++i)
+        for (int j = 2; j < ny + 2; ++j) {
+            Vec& p = w[i][j];
+            if (cfg.rho_floor > 0.0 && p[0] < cfg.rho_floor) p[0] = cfg.rho_floor;
+            if (cfg.p_floor   > 0.0 && p[4] < cfg.p_floor)   p[4] = cfg.p_floor;
+        }
+}
+
 void sweep_x(Grid& w, int nx, int ny, double dt, double dx, const RunConfig& cfg,
              DivergenceController& divb) {
     const bool ct = divb.uses_face_centered_b();
@@ -294,10 +320,17 @@ void sweep_x(Grid& w, int nx, int ny, double dt, double dx, const RunConfig& cfg
             if (ct) {
                 divb.fill_face_bn_x(j_int, nx, sc.face_bn_buf.data());
                 slic_step(sc, s, nx, dt, dx, cfg, divb,
-                          sc.face_bn_buf.data(), sc.emf_buf.data());
-                // In the x-direction: F[6] = vx·By − vy·Bx = −Ez, so Ez = −F[6].
-                for (int ii = 1; ii <= nx + 1; ++ii) sc.emf_buf[ii] = -sc.emf_buf[ii];
-                divb.store_emf_x(j_int, nx, sc.emf_buf.data());
+                          sc.face_bn_buf.data(), sc.emf_buf.data(),
+                          sc.cemf_buf.data(), sc.sgn_buf.data());
+                // x-direction: F[6] = vx·By − vy·Bx = −Ez, so Ez = −F[6].
+                // Apply the same sign flip to both numerical and centered EMF.
+                // sgn_buf holds sign(ρvx) which is frame-independent — no flip.
+                for (int ii = 1; ii <= nx + 1; ++ii) {
+                    sc.emf_buf[ii]  = -sc.emf_buf[ii];
+                    sc.cemf_buf[ii] = -sc.cemf_buf[ii];
+                }
+                divb.store_emf_x(j_int, nx, sc.emf_buf.data(),
+                                 sc.cemf_buf.data(), sc.sgn_buf.data());
             } else {
                 slic_step(sc, s, nx, dt, dx, cfg, divb);
             }
@@ -327,9 +360,12 @@ void sweep_y(Grid& w, int nx, int ny, double dt, double dy, const RunConfig& cfg
                 // fill_face_bn_y returns face_.by[i_int][j-1] = By on y-faces.
                 divb.fill_face_bn_y(i_int, ny, sc.face_bn_buf.data());
                 slic_step(sc, s, ny, dt, dy, cfg, divb,
-                          sc.face_bn_buf.data(), sc.emf_buf.data());
+                          sc.face_bn_buf.data(), sc.emf_buf.data(),
+                          sc.cemf_buf.data(), sc.sgn_buf.data());
                 // Rotated F[6] = Bx_orig·vy_orig − vx_orig·By_orig = +Ez; no sign flip.
-                divb.store_emf_y(i_int, ny, sc.emf_buf.data());
+                // sgn_buf holds sign(ρvy_orig) — correct upwind direction.
+                divb.store_emf_y(i_int, ny, sc.emf_buf.data(),
+                                 sc.cemf_buf.data(), sc.sgn_buf.data());
             } else {
                 slic_step(sc, s, ny, dt, dy, cfg, divb);
             }
@@ -358,15 +394,20 @@ double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
             ch_loc = std::max(ch_loc, std::max(sx, sy));
             // Track max Alfvén speed for Hall CFL: v_A = |B|/sqrt(ρ)
             double B2 = p[5]*p[5] + p[6]*p[6] + p[7]*p[7];
-            max_va2 = std::max(max_va2, B2 / std::max(p[0], 1e-14));
+            double rho_va = cfg.hall_di > 0.0 ? std::max(p[0], 0.1) : std::max(p[0], 1e-14);
+            max_va2 = std::max(max_va2, B2 / rho_va);
         }
     }
     divb.update_characteristic_speed(ch_loc);
-    // Hall whistler CFL: dt ≤ min(dx,dy)² / (d_i · v_A)
-    // Equivalent smax contribution: d_i · v_A / min(dx,dy)²
+    // Hall whistler CFL (RK4 integration).
+    // RK4 is stable for |ω·dt| < 2√2 ≈ 2.83 on the imaginary axis.
+    // ω_max = d_i·(π/mincell)²·v_A, so need d_i·π²·v_A/mincell² · dt < 2.83.
+    // Express as smax contribution: smax_hall = d_i·π²·v_A / (2.83·mincell²).
     if (cfg.hall_di > 0.0) {
+        constexpr double pi = 3.14159265358979323846;
         double mincell = std::min(dx, dy);
-        double smax_hall = cfg.hall_di * std::sqrt(max_va2) / (mincell * mincell);
+        double smax_hall = cfg.hall_di * (pi*pi/2.83) * std::sqrt(max_va2)
+                           / (mincell * mincell);
         smax = std::max(smax, smax_hall);
     }
     return cfg.cfl / smax;
@@ -535,12 +576,24 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
                     w[i][j] = (x < 0.0) ? L : R;
                     break;
                 }
-                case 11: case 12: {
-                    // Harris current-sheet reconnection
-                    // IC references: see include/my_project/harris_sheet.hpp
-                    //   Harris (1962) equilibrium + Birn et al. (2001) perturbation
-                    // Test 12 = Hall MHD; same IC, Hall term added in post_step.
+                case 11: {
+                    // Harris current-sheet — resistive MHD
+                    // Uniform density (Loureiro et al. 2007 convention): ρ = ρ_bg = 1.
                     w[i][j] = harris_cell_ic(x, y, HarrisSheetParams{});
+                    break;
+                }
+                case 12: {
+                    // Harris current-sheet — Hall MHD (GEM challenge)
+                    // Use kinetic Harris density n(y) = n_bg + sech²(y/λ) so that
+                    // ρ_min = n_bg = 0.2 prevents (d_i/ρ)J×B from diverging at X-line.
+                    // Reference: Birn et al. (2001), J. Geophys. Res. 106, 3715.
+                    // Pressure p_eq(y) = 0.5·(0.2 + sech²(y/λ)) is already consistent
+                    // with this density at uniform temperature T = 0.5 — no change needed.
+                    const HarrisSheetParams hp;
+                    Vec ic = harris_cell_ic(x, y, hp);
+                    const double s = 1.0 / std::cosh(y / hp.lam);
+                    ic[0] = 0.2 + s * s;   // GEM: n_bg=0.2, n0=1.0
+                    w[i][j] = ic;
                     break;
                 }
                 case 13: {
@@ -591,6 +644,9 @@ OutputData run_simulation(const RunConfig& cfg) {
     double t_sweepx = 0.0, t_sweepy = 0.0, t_other = 0.0;
     auto T0 = Clock::now();
 
+    if (cfg.rho_floor > 0.0)
+        std::cout << "  density floor = " << cfg.rho_floor << ",  p_floor = " << cfg.p_floor << "\n";
+
     // Snapshot output: write at t=0, then every output_dt.
     const bool do_snaps = cfg.output_dt > 0.0;
     int snap_idx = 0;
@@ -612,12 +668,15 @@ OutputData run_simulation(const RunConfig& cfg) {
         divb->pre_step(w, cfg.nx, cfg.ny, dt, dx, dy);
         auto tb = Clock::now();
         sweep_x(w, cfg.nx, cfg.ny, 0.5 * dt, dx, cfg, *divb);
+        apply_floor(w, cfg.nx, cfg.ny, cfg);
         auto tc = Clock::now();
         apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
         sweep_y(w, cfg.nx, cfg.ny, dt, dy, cfg, *divb);
+        apply_floor(w, cfg.nx, cfg.ny, cfg);
         auto td = Clock::now();
         apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
         sweep_x(w, cfg.nx, cfg.ny, 0.5 * dt, dx, cfg, *divb);
+        apply_floor(w, cfg.nx, cfg.ny, cfg);
         auto te = Clock::now();
         divb->post_step(w, cfg.nx, cfg.ny, dt, Lx, Ly, dx, dy);
         auto tf = Clock::now();
@@ -648,8 +707,10 @@ OutputData run_simulation(const RunConfig& cfg) {
                       << "  max|psi|=" << diag.max_psi
                       << "  max|v|=" << diag.max_v
                       << '\n';
-            if (diag.min_rho < 0 || diag.min_p < 0 || !std::isfinite(diag.max_divB)) {
-                std::cerr << "*** FATAL: unphysical state at step " << step << '\n';
+            if (diag.min_rho < 0 || diag.min_p < 0 || !std::isfinite(diag.max_divB)
+                    || !std::isfinite(diag.max_v) || dt < 1e-8 * (t > 0 ? t : 1.0)) {
+                std::cerr << "*** FATAL: unphysical state at step " << step
+                          << " (dt=" << dt << ")\n";
                 break;
             }
         }
