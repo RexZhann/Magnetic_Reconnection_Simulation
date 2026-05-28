@@ -446,8 +446,10 @@ Diagnostics compute_diagnostics(const Grid& w, int nx, int ny,
                                 const FaceField2D* face_field) {
     Diagnostics d;
     double min_rho = 1e30, min_p = 1e30, max_divB = 0.0, max_psi = 0.0, max_v = 0.0;
+    double divB_sum2 = 0.0;
     #pragma omp parallel for collapse(2) schedule(static) \
-        reduction(min:min_rho,min_p) reduction(max:max_divB,max_psi,max_v)
+        reduction(min:min_rho,min_p) reduction(max:max_divB,max_psi,max_v) \
+        reduction(+:divB_sum2)
     for (int i = 2; i < nx + 2; ++i) {
         for (int j = 2; j < ny + 2; ++j) {
             const Vec& p = w[i][j];
@@ -458,21 +460,28 @@ Diagnostics compute_diagnostics(const Grid& w, int nx, int ny,
             if (!face_field || face_field->empty()) {
                 double dBx = (w[i + 1][j][5] - w[i - 1][j][5]) / (2 * dx);
                 double dBy = (w[i][j + 1][6] - w[i][j - 1][6]) / (2 * dy);
-                max_divB = std::max(max_divB, std::fabs(dBx + dBy));
+                double div = dBx + dBy;
+                max_divB = std::max(max_divB, std::fabs(div));
+                divB_sum2 += div * div;
             }
         }
     }
     if (face_field && !face_field->empty()) {
-        #pragma omp parallel for collapse(2) reduction(max:max_divB) schedule(static)
+        #pragma omp parallel for collapse(2) \
+            reduction(max:max_divB) reduction(+:divB_sum2) schedule(static)
         for (int i = 0; i < nx; ++i) {
             for (int j = 0; j < ny; ++j) {
                 double dBx = (face_field->bx[i + 1][j] - face_field->bx[i][j]) / dx;
                 double dBy = (face_field->by[i][j + 1] - face_field->by[i][j]) / dy;
-                max_divB = std::max(max_divB, std::fabs(dBx + dBy));
+                double div = dBx + dBy;
+                max_divB = std::max(max_divB, std::fabs(div));
+                divB_sum2 += div * div;
             }
         }
     }
-    d.min_rho = min_rho; d.min_p = min_p; d.max_divB = max_divB; d.max_psi = max_psi; d.max_v = max_v;
+    d.min_rho = min_rho; d.min_p = min_p; d.max_divB = max_divB;
+    d.l2_divB = std::sqrt(divB_sum2 * dx * dy);
+    d.max_psi = max_psi; d.max_v = max_v;
     return d;
 }
 
@@ -657,6 +666,17 @@ OutputData run_simulation(const RunConfig& cfg) {
         std::cout << "Snapshot 0 written (t=0)\n";
     }
 
+    // L2 divB log: one line per diagnostic interval.
+    const std::string divb_log_path = "output/test" + std::to_string(cfg.test) + "_"
+        + std::to_string(cfg.nx) + "x" + std::to_string(cfg.ny)
+        + solver_suffix(cfg.solver) + divb_suffix(cfg.divb) + "_divBl2.log";
+    std::ofstream divb_log(divb_log_path);
+    divb_log << "# t  l2_divB\n";
+    {
+        Diagnostics d0 = compute_diagnostics(w, cfg.nx, cfg.ny, dx, dy, divb->face_field());
+        divb_log << 0.0 << ' ' << d0.l2_divB << '\n';
+    }
+
     while (t < cfg.t_end) {
         auto ta = Clock::now();
         apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
@@ -704,9 +724,11 @@ OutputData run_simulation(const RunConfig& cfg) {
                       << "  min_rho=" << diag.min_rho
                       << "  min_p=" << diag.min_p
                       << "  max|divB|=" << diag.max_divB
+                      << "  l2|divB|=" << diag.l2_divB
                       << "  max|psi|=" << diag.max_psi
                       << "  max|v|=" << diag.max_v
                       << '\n';
+            divb_log << t << ' ' << diag.l2_divB << '\n';
             if (diag.min_rho < 0 || diag.min_p < 0 || !std::isfinite(diag.max_divB)
                     || !std::isfinite(diag.max_v) || dt < 1e-8 * (t > 0 ? t : 1.0)) {
                 std::cerr << "*** FATAL: unphysical state at step " << step
@@ -786,4 +808,4 @@ void write_output_file(const OutputData& out, const RunConfig& cfg) {
     }
 }
 
-} // namespace my_project
+} // namespace
