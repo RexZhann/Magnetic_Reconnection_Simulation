@@ -687,22 +687,42 @@ OutputData run_simulation(const RunConfig& cfg) {
         apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
         divb->pre_step(w, cfg.nx, cfg.ny, dt, dx, dy);
         auto tb = Clock::now();
-        sweep_x(w, cfg.nx, cfg.ny, 0.5 * dt, dx, cfg, *divb);
-        apply_floor(w, cfg.nx, cfg.ny, cfg);
-        auto tc = Clock::now();
-        apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
-        sweep_y(w, cfg.nx, cfg.ny, dt, dy, cfg, *divb);
-        apply_floor(w, cfg.nx, cfg.ny, cfg);
-        auto td = Clock::now();
-        apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
-        sweep_x(w, cfg.nx, cfg.ny, 0.5 * dt, dx, cfg, *divb);
-        apply_floor(w, cfg.nx, cfg.ny, cfg);
-        auto te = Clock::now();
+
+        // Alternating Strang splitting: even steps XYX, odd steps YXY.
+        Clock::time_point tc, td, te;
+        if (step % 2 == 0) {
+            sweep_x(w, cfg.nx, cfg.ny, 0.5 * dt, dx, cfg, *divb);
+            apply_floor(w, cfg.nx, cfg.ny, cfg);
+            tc = Clock::now();
+            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+            sweep_y(w, cfg.nx, cfg.ny, dt, dy, cfg, *divb);
+            apply_floor(w, cfg.nx, cfg.ny, cfg);
+            td = Clock::now();
+            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+            sweep_x(w, cfg.nx, cfg.ny, 0.5 * dt, dx, cfg, *divb);
+            apply_floor(w, cfg.nx, cfg.ny, cfg);
+            te = Clock::now();
+            t_sweepx += elapsed(tb, tc) + elapsed(td, te);
+            t_sweepy += elapsed(tc, td);
+        } else {
+            sweep_y(w, cfg.nx, cfg.ny, 0.5 * dt, dy, cfg, *divb);
+            apply_floor(w, cfg.nx, cfg.ny, cfg);
+            tc = Clock::now();
+            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+            sweep_x(w, cfg.nx, cfg.ny, dt, dx, cfg, *divb);
+            apply_floor(w, cfg.nx, cfg.ny, cfg);
+            td = Clock::now();
+            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+            sweep_y(w, cfg.nx, cfg.ny, 0.5 * dt, dy, cfg, *divb);
+            apply_floor(w, cfg.nx, cfg.ny, cfg);
+            te = Clock::now();
+            t_sweepy += elapsed(tb, tc) + elapsed(td, te);
+            t_sweepx += elapsed(tc, td);
+        }
+
         divb->post_step(w, cfg.nx, cfg.ny, dt, Lx, Ly, dx, dy);
         auto tf = Clock::now();
 
-        t_sweepx += elapsed(tb, tc) + elapsed(td, te);
-        t_sweepy += elapsed(tc, td);
         t_other += elapsed(ta, tb) + elapsed(te, tf);
         t += dt;
         ++step;

@@ -9,10 +9,12 @@ namespace my_project {
 struct ScratchBuf {
     int cap = 0;
     Row uc, d0, d1, delta, xL, xR, hL, hR, iflx, s_row;
-    // CT work buffers: face-centered normal B and interface EMF values.
-    // Sized to N = n+4 (matching the 1D slice length).
+    // CT work buffers: face-centered normal B, interface EMF, centered EMF,
+    // and mass-flux sign. Sized to N = n+4 (matching the 1D slice length).
     std::vector<double> face_bn_buf;
     std::vector<double> emf_buf;
+    std::vector<double> cemf_buf;   // centered (dissipation-free) EMF
+    std::vector<double> sgn_buf;    // sign of mass flux (+1 or -1)
     void ensure(int N);
 };
 

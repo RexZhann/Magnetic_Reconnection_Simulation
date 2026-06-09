@@ -60,12 +60,18 @@ struct RunConfig {
     // >0 = also write snap000.dat, snap001.dat, ... at every output_dt interval
     // starting from t=0.  Useful for animation and time-series diagnostics.
     double output_dt = 0.0;
+
+    // Density and pressure floors applied after each sweep (0 = disabled).
+    // Prevents density cavitation from causing dt → 0 at reconnection sites.
+    double rho_floor = 0.0;
+    double p_floor   = 0.0;
 };
 
 struct Diagnostics {
     double min_rho = 0.0;
     double min_p = 0.0;
     double max_divB = 0.0;
+    double l2_divB = 0.0;
     double max_psi = 0.0;
     double max_v = 0.0;
 };

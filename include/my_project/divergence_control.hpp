@@ -39,9 +39,14 @@ public:
 
     // CT interface: store interface EMFs produced by a 1D sweep.
     // emf[i] (i=1..n+1) is Ez at interface i of the slice.
+    // cemf[i] is the centered (dissipation-free) EMF; sgn[i] is sign(mass flux).
     // x-sweep: Ez = -F[6]; y-sweep (rotated frame): Ez = F[6].
-    virtual void store_emf_x(int /*j*/, int /*n*/, const double* /*emf*/) {}
-    virtual void store_emf_y(int /*i*/, int /*n*/, const double* /*emf*/) {}
+    virtual void store_emf_x(int /*j*/, int /*n*/, const double* /*emf*/,
+                              const double* /*cemf*/ = nullptr,
+                              const double* /*sgn*/  = nullptr) {}
+    virtual void store_emf_y(int /*i*/, int /*n*/, const double* /*emf*/,
+                              const double* /*cemf*/ = nullptr,
+                              const double* /*sgn*/  = nullptr) {}
 };
 
 class NoDivBCleaning final : public DivergenceController {
@@ -96,8 +101,10 @@ public:
 
     void fill_face_bn_x(int j, int n, double* buf) const override;
     void fill_face_bn_y(int i, int n, double* buf) const override;
-    void store_emf_x(int j, int n, const double* emf) override;
-    void store_emf_y(int i, int n, const double* emf) override;
+    void store_emf_x(int j, int n, const double* emf,
+                     const double* cemf = nullptr, const double* sgn = nullptr) override;
+    void store_emf_y(int i, int n, const double* emf,
+                     const double* cemf = nullptr, const double* sgn = nullptr) override;
 
 private:
     FaceField2D face_;
@@ -106,6 +113,9 @@ private:
     //   emf_y_[i][k] = Ez at y-face by[i][k]   (i=0..nx-1, k=0..ny)
     ScalarField emf_x_;
     ScalarField emf_y_;
+    // CT-Contact: centered (dissipation-free) EMF and sign(mass flux).
+    ScalarField cemf_x_, cemf_y_;
+    ScalarField sgn_x_,  sgn_y_;
     int nx_ = 0, ny_ = 0;
     double ch_like_ = 0.0;
     double gamma_   = 1.4;
