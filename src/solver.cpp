@@ -261,6 +261,75 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.gamma = 5.0 / 3.0; cfg.t_end = 1.0;
             cfg.bcx = BC::Periodic; cfg.bcy = BC::Transmissive; break;
         }
+        case 14: { // Same wave propagating in y — convergence test for y-sweeps
+            // Mirror of test 13: guide field By=B0, perturbations in Bx/Bz,
+            // periodic in y, nx=2 (thin strip in x).
+            cfg.x0 = 0.0; cfg.x1 = static_cast<double>(nx) / ny;
+            cfg.y0 = 0.0; cfg.y1 = 1.0;
+            cfg.gamma = 5.0 / 3.0; cfg.t_end = 1.0;
+            cfg.bcx = BC::Transmissive; cfg.bcy = BC::Periodic; break;
+        }
+        case 15: { // 2D circularly polarised Alfvén wave at 45° — Tóth (2000) §5.2
+            // Wave vector k = 2π(x̂+ŷ), guide field B0(x̂+ŷ)/√2.
+            // Periodic in both directions; domain [0,1]×[0,1]; nx=ny=N.
+            // t_end = 1/√2: one Alfvén period → solution returns to initial state.
+            cfg.x0 = 0.0; cfg.x1 = 1.0;
+            cfg.y0 = 0.0; cfg.y1 = 1.0;
+            cfg.gamma = 5.0 / 3.0;
+            cfg.t_end = 1.0 / std::sqrt(2.0);
+            cfg.bcx = BC::Periodic; cfg.bcy = BC::Periodic; break;
+        }
+        case 16: { // Hyper-resistivity k⁴ scaling — mode n=1 (k=2π)
+            // By=A0·sin(2πx), no background field.  All three modes (16/17/18) share
+            // identical η_H and t_end so γ ratios directly reflect the k⁴ operator.
+            // Analytic: γ = η_H·k⁴.  Run: ./build/mhd2d 16 64 64 2 1
+            cfg.x0 = 0.0; cfg.x1 = 1.0;
+            cfg.y0 = 0.0; cfg.y1 = 1.0;
+            cfg.gamma = 5.0 / 3.0;
+            cfg.t_end = 0.05;
+            cfg.bcx = BC::Periodic; cfg.bcy = BC::Periodic;
+            cfg.eta_H = 1e-4;
+            break;
+        }
+        case 17: { // Hyper-resistivity k⁴ scaling — mode n=2 (k=4π)
+            cfg.x0 = 0.0; cfg.x1 = 1.0;
+            cfg.y0 = 0.0; cfg.y1 = 1.0;
+            cfg.gamma = 5.0 / 3.0;
+            cfg.t_end = 0.05;
+            cfg.bcx = BC::Periodic; cfg.bcy = BC::Periodic;
+            cfg.eta_H = 1e-4;
+            break;
+        }
+        case 18: { // Hyper-resistivity k⁴ scaling — mode n=4 (k=8π)
+            cfg.x0 = 0.0; cfg.x1 = 1.0;
+            cfg.y0 = 0.0; cfg.y1 = 1.0;
+            cfg.gamma = 5.0 / 3.0;
+            cfg.t_end = 0.05;
+            cfg.bcx = BC::Periodic; cfg.bcy = BC::Periodic;
+            cfg.eta_H = 1e-4;
+            break;
+        }
+        case 19: { // Harris sheet — hyper-resistive MHD reconnection
+            // Same equilibrium and domain as test 11 (resistive MHD), but
+            // replaces uniform resistivity η with 4th-order hyper-resistivity η_H.
+            // η_H = 0.001 gives effective dissipation at grid scale comparable to
+            // η = 0.005 at the current-sheet scale λ = 0.5.
+            // dt ~ h^4/(32 η_H) ≈ 2.9e-3 for 128×64 → ~7k steps for t_end=20.
+            const HarrisSheetParams hp;
+            cfg.x0        = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
+            cfg.y0        = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
+            cfg.gamma     = 5.0 / 3.0;
+            cfg.t_end     = 25.0;
+            cfg.bcx       = BC::Periodic;
+            cfg.bcy       = BC::Transmissive;
+            cfg.eta       = 0.0;          // no uniform resistivity
+            cfg.eta_H     = 0.001;        // hyper-resistivity only
+            cfg.hall_di   = 0.0;
+            cfg.output_dt = 1.0;
+            cfg.rho_floor = 0.1;
+            cfg.p_floor   = 0.01;
+            break;
+        }
         default:
             throw std::runtime_error("Unknown test id");
     }
@@ -410,7 +479,14 @@ double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
                            / (mincell * mincell);
         smax = std::max(smax, smax_hall);
     }
-    return cfg.cfl / smax;
+    double dt = cfg.cfl / smax;
+    if (cfg.eta_H > 0.0) {
+        double mincell = std::min(dx, dy);
+        // Explicit Euler stability for biharmonic: dt ≤ h⁴ / (32·η_H).
+        double dt_hyper = std::pow(mincell, 4) / (32.0 * cfg.eta_H);
+        dt = std::min(dt, dt_hyper);
+    }
+    return dt;
 }
 
 // When face_field is provided (CT mode) the exact face-difference ∇·B is used,
@@ -624,6 +700,79 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
                                 0.0 };
                     break;
                 }
+                case 14: {
+                    // Same wave propagating in y — mirror of test 13.
+                    // Guide field By = B0; perturbations in Bx/Bz plane.
+                    constexpr double pi = 3.14159265358979323846;
+                    const double k  = 2.0 * pi;
+                    const double B0 = 1.0, rho0 = 1.0;
+                    const double va = B0 / std::sqrt(rho0);
+                    const double Bperp = 0.1 * B0;
+                    w[i][j] = { rho0,
+                               -va * Bperp * std::sin(k * y) / B0,
+                                0.0,
+                                va * Bperp * std::cos(k * y) / B0,
+                                0.1,
+                                Bperp * std::sin(k * y),
+                                B0,
+                               -Bperp * std::cos(k * y),
+                                0.0 };
+                    break;
+                }
+                case 15: {
+                    // 2D circularly polarised Alfvén wave at 45° (Tóth 2000 §5.2).
+                    // Guide field: B0 along (x̂+ŷ)/√2.
+                    // Perturbation phase: φ = 2π(x+y).
+                    constexpr double pi = 3.14159265358979323846;
+                    constexpr double s2 = 1.41421356237309504880; // √2
+                    const double phi    = 2.0 * pi * (x + y);
+                    const double B0 = 1.0, Bperp = 0.1;
+                    w[i][j] = { 1.0,
+                                 Bperp / s2 * std::sin(phi),   // vx = −δBx (forward: v=−B)
+                                -Bperp / s2 * std::sin(phi),   // vy = −δBy
+                                -Bperp      * std::cos(phi),   // vz = −Bz  (forward)
+                                 0.1,
+                                 B0 / s2 - Bperp / s2 * std::sin(phi),  // Bx
+                                 B0 / s2 + Bperp / s2 * std::sin(phi),  // By
+                                +Bperp      * std::cos(phi),              // Bz (forward: sign +)
+                                 0.0 };
+                    break;
+                }
+                case 16: {
+                    // k=2π (n=1).  Analytic: A(t) = A0·exp(−η_H·(2π)⁴·t).
+                    constexpr double pi = 3.14159265358979323846;
+                    const double A0 = 0.1;
+                    w[i][j] = { 1.0, 0.0, 0.0, 0.0, 0.1,
+                                 0.0,
+                                 A0 * std::sin(2.0 * pi * x),
+                                 0.0, 0.0 };
+                    break;
+                }
+                case 17: {
+                    // k=4π (n=2).  Analytic: A(t) = A0·exp(−η_H·(4π)⁴·t).
+                    constexpr double pi = 3.14159265358979323846;
+                    const double A0 = 0.1;
+                    w[i][j] = { 1.0, 0.0, 0.0, 0.0, 0.1,
+                                 0.0,
+                                 A0 * std::sin(4.0 * pi * x),
+                                 0.0, 0.0 };
+                    break;
+                }
+                case 18: {
+                    // k=8π (n=4).  Analytic: A(t) = A0·exp(−η_H·(8π)⁴·t).
+                    constexpr double pi = 3.14159265358979323846;
+                    const double A0 = 0.1;
+                    w[i][j] = { 1.0, 0.0, 0.0, 0.0, 0.1,
+                                 0.0,
+                                 A0 * std::sin(8.0 * pi * x),
+                                 0.0, 0.0 };
+                    break;
+                }
+                case 19: {
+                    // Harris sheet — hyper-resistive MHD (same IC as test 11).
+                    w[i][j] = harris_cell_ic(x, y, HarrisSheetParams{});
+                    break;
+                }
                 default:
                     throw std::runtime_error("Unknown test id");
             }
@@ -646,6 +795,7 @@ OutputData run_simulation(const RunConfig& cfg) {
     divb->set_boundary_conditions(cfg.bcx, cfg.bcy);
     divb->set_resistivity(cfg.eta);
     divb->set_hall(cfg.hall_di);
+    divb->set_hyper_resistivity(cfg.eta_H);
     divb->initialize(w, cfg, dx, dy);
 
     double t = 0.0;

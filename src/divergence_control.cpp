@@ -55,8 +55,9 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
                                     double dt, double /*Lx*/, double /*Ly*/,
                                     double dx, double dy) {
     compute_corner_emf_from_interface_emfs(nx, ny);
-    add_resistive_correction(w, nx, ny, dt, dx, dy);  // no-op when eta_ == 0
-    add_hall_correction(w, nx, ny, dt, dx, dy);        // no-op when hall_di_ == 0
+    add_resistive_correction(w, nx, ny, dt, dx, dy);   // no-op when eta_ == 0
+    add_hyper_resistive_correction(nx, ny, dx, dy);     // no-op when eta_H_ == 0
+    add_hall_correction(w, nx, ny, dt, dx, dy);         // no-op when hall_di_ == 0
     update_faces_from_emf(nx, ny, dt, dx, dy);
     sync_cell_centered_from_faces(w, nx, ny);
 
@@ -127,6 +128,15 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
                 // Guarantees ∇·B = 0 to machine precision (Tóth 2000, §4.1).
                 return harris_bx_face(x, y, dy, HarrisSheetParams{});
             }
+            case 15: {
+                // 45° Alfvén wave: Az = (y−x)/√2 + c·cos(2π(x+y)), c = 0.1/(2π√2)
+                // bx = [Az(x,y+½Δy) − Az(x,y−½Δy)] / Δy
+                //    = 1/√2 − 2c·sin(2π(x+y))·sin(π·Δy)/Δy
+                constexpr double pi = 3.14159265358979323846;
+                constexpr double s2 = 1.41421356237309504880;
+                const double c = 0.1 / (2.0 * pi * s2);
+                return 1.0/s2 - 2.0*c * std::sin(2.0*pi*(x+y)) * std::sin(pi*dy) / dy;
+            }
             default: return std::numeric_limits<double>::quiet_NaN();
         }
     };
@@ -144,6 +154,15 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
                 // by = −[Az(x+Δx/2, y) − Az(x−Δx/2, y)] / Δx
                 // Guarantees ∇·B = 0 to machine precision (Tóth 2000, §4.1).
                 return harris_by_face(x, y, dx, HarrisSheetParams{});
+            }
+            case 15: {
+                // 45° Alfvén wave: Az = (y−x)/√2 + c·cos(2π(x+y)), c = 0.1/(2π√2)
+                // by = −[Az(x+½Δx,y) − Az(x−½Δx,y)] / Δx
+                //    = 1/√2 + 2c·sin(2π(x+y))·sin(π·Δx)/Δx
+                constexpr double pi = 3.14159265358979323846;
+                constexpr double s2 = 1.41421356237309504880;
+                const double c = 0.1 / (2.0 * pi * s2);
+                return 1.0/s2 + 2.0*c * std::sin(2.0*pi*(x+y)) * std::sin(pi*dx) / dx;
             }
             default: return std::numeric_limits<double>::quiet_NaN();
         }
@@ -260,6 +279,79 @@ void CTDivergenceControl::add_resistive_correction(Grid& w, int nx, int ny,
         for (int j = 0; j < ny; ++j) {
             double Jc = 0.25 * (Jz[i][j] + Jz[i+1][j] + Jz[i][j+1] + Jz[i+1][j+1]);
             w[i + 2][j + 2][4] += (gamma_ - 1.0) * eta_ * Jc * Jc * dt;
+        }
+    }
+}
+
+// Hyper-resistive correction: add −η_H·∇²Jz to every corner EMF.
+//
+// With E_hyper = −η_H ∇²Jz and CT Faraday (∂B/∂t = −∇×E), the net effect
+// on a div-B-free field is ∂B/∂t = −η_H ∇⁴B (4th-order biharmonic damping).
+// This suppresses grid-scale magnetic noise with k⁴ selectivity.
+//
+// Algorithm:
+//   1. Compute Jz at every corner using the same face-B stencil as add_resistive_correction.
+//   2. Apply the 5-point Laplacian over corners: ∇²Jz ≈ (Jz[I+1,J]−2Jz[I,J]+Jz[I-1,J])/dx²
+//      + (Jz[I,J+1]−2Jz[I,J]+Jz[I,J-1])/dy².  Neighbours wrap periodically / clamp.
+//   3. face_.emf_z[I][J] −= η_H · ∇²Jz[I][J].
+//
+// Explicit stability: dt ≤ h⁴/(32·η_H) is enforced by compute_dt.
+void CTDivergenceControl::add_hyper_resistive_correction(int nx, int ny,
+                                                         double dx, double dy) {
+    if (eta_H_ <= 0.0) return;
+
+    // Step 1: Jz at every corner (same stencil as add_resistive_correction).
+    ScalarField Jz(nx + 1, std::vector<double>(ny + 1, 0.0));
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int I = 0; I <= nx; ++I) {
+        for (int J = 0; J <= ny; ++J) {
+            double byR, byL;
+            if (bcx_ == BC::Periodic) {
+                int Ir = (I < nx) ? I      : 0;
+                int Il = (I > 0)  ? I - 1  : nx - 1;
+                byR = face_.by[Ir][J];
+                byL = face_.by[Il][J];
+            } else {
+                byR = face_.by[(I < nx) ? I     : nx - 1][J];
+                byL = face_.by[(I > 0)  ? I - 1 : 0     ][J];
+            }
+            double bxU, bxD;
+            if (bcy_ == BC::Periodic) {
+                int Ju = (J < ny) ? J      : 0;
+                int Jd = (J > 0)  ? J - 1  : ny - 1;
+                bxU = face_.bx[I][Ju];
+                bxD = face_.bx[I][Jd];
+            } else {
+                bxU = face_.bx[I][(J < ny) ? J     : ny - 1];
+                bxD = face_.bx[I][(J > 0)  ? J - 1 : 0     ];
+            }
+            Jz[I][J] = (byR - byL) / dx - (bxU - bxD) / dy;
+        }
+    }
+
+    // Step 2: ∇²Jz via 5-point stencil; add −η_H·∇²Jz to corner EMF.
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int I = 0; I <= nx; ++I) {
+        for (int J = 0; J <= ny; ++J) {
+            int Im, Ip, Jm, Jp;
+            if (bcx_ == BC::Periodic) {
+                Im = (I > 0)  ? I - 1 : nx - 1;
+                Ip = (I < nx) ? I + 1 : 1;
+            } else {
+                Im = (I > 0)  ? I - 1 : 0;
+                Ip = (I < nx) ? I + 1 : nx;
+            }
+            if (bcy_ == BC::Periodic) {
+                Jm = (J > 0)  ? J - 1 : ny - 1;
+                Jp = (J < ny) ? J + 1 : 1;
+            } else {
+                Jm = (J > 0)  ? J - 1 : 0;
+                Jp = (J < ny) ? J + 1 : ny;
+            }
+            double lap = (Jz[Ip][J] - 2.0*Jz[I][J] + Jz[Im][J]) / (dx*dx)
+                       + (Jz[I][Jp] - 2.0*Jz[I][J] + Jz[I][Jm]) / (dy*dy);
+            face_.emf_z[I][J] -= eta_H_ * lap;
         }
     }
 }

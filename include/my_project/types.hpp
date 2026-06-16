@@ -55,6 +55,12 @@ struct RunConfig {
     // is enforced automatically by compute_dt.
     double hall_di = 0.0;
 
+    // 4th-order hyper-resistivity coefficient η_H (0 = off).
+    // Adds E_hyper = −η_H ∇²Jz to the corner EMF, giving ∂B/∂t = −η_H ∇⁴B.
+    // Only active in CT mode.  Explicit CFL: dt ≤ min(dx,dy)⁴ / (32 η_H)
+    // is enforced automatically by compute_dt.
+    double eta_H = 0.0;
+
     // Snapshot output interval [simulation time units].
     // 0 = write only the final state (default).
     // >0 = also write snap000.dat, snap001.dat, ... at every output_dt interval
