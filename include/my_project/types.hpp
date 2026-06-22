@@ -30,6 +30,12 @@ enum class BC { Transmissive, Periodic };
 enum class SolverKind { FORCE = 0, HLLD = 1 };
 enum class DivBCleaningKind { None = 0, GLM = 1, CT = 2 };
 
+// 霍尔短波稳定化方案（仅 CT 模式有效）。
+// NONE      : 无额外稳定化，依赖 RK4 Hall CFL 本身
+// HYPER_RES : 4 阶超电阻 −η_H ∇²Jz（原有方案，test 20/21）
+// HALL_HLL  : 哨声波速度 HLL 1 阶迎风扩散（Path B，test 23）
+enum class HallStabKind { NONE = 0, HYPER_RES = 1, HALL_HLL = 2 };
+
 struct RunConfig {
     int test = 0;
     int nx = 200;
@@ -71,6 +77,17 @@ struct RunConfig {
     // Prevents density cavitation from causing dt → 0 at reconnection sites.
     double rho_floor = 0.0;
     double p_floor   = 0.0;
+
+    // Non-ideal sub-cycling: when true, the Hall and resistive CFL constraints
+    // are removed from the global hyperbolic timestep and handled by sub-cycling
+    // the non-ideal (resistive + Hall + hyper) block N_sub times per global step.
+    // When false (default), behaviour is identical to the original single-step path.
+    bool subcycle_nonideal = false;
+    int  n_subcycle_max    = 100;   // safety cap on N_sub; a warning is printed if hit
+
+    // 霍尔稳定化方案选择（见 HallStabKind 注释）。
+    // 默认 NONE：依赖 RK4 Hall CFL；test 20/21 显式设为 HYPER_RES；test 23 设为 HALL_HLL。
+    HallStabKind hall_stab = HallStabKind::NONE;
 };
 
 struct Diagnostics {

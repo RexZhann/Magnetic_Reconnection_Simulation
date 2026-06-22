@@ -330,6 +330,103 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.p_floor   = 0.01;
             break;
         }
+        case 20: { // Harris 电流片——Hall MHD + 超电阻（GEM + hyper）
+            // Hall 项（d_i=1，GEM challenge）+ 超电阻（η_H=0.001）
+            // dt 由 Hall RK4 CFL 主导（约 2.6e-4 for 128×64）
+            const HarrisSheetParams hp;
+            cfg.x0        = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
+            cfg.y0        = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
+            cfg.gamma     = 5.0 / 3.0;
+            cfg.t_end     = 15.0;
+            cfg.bcx       = BC::Periodic;
+            cfg.bcy       = BC::Transmissive;
+            cfg.eta       = 0.0;
+            cfg.eta_H     = 0.001;
+            cfg.hall_di   = 1.0;
+            cfg.hall_stab = HallStabKind::HYPER_RES;
+            cfg.output_dt = 1.0;
+            cfg.rho_floor = 0.02;
+            cfg.p_floor   = 0.005;
+            break;
+        }
+        case 21: { // test 20 + 非理想子循环（subcycle_nonideal=true）
+            // 霍尔 CFL 从全局 dt 移除；每全局步做 N_sub 子步处理哨声波稳定性
+            const HarrisSheetParams hp;
+            cfg.x0        = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
+            cfg.y0        = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
+            cfg.gamma     = 5.0 / 3.0;
+            cfg.t_end     = 15.0;
+            cfg.bcx       = BC::Periodic;
+            cfg.bcy       = BC::Transmissive;
+            cfg.eta       = 0.0;
+            cfg.eta_H     = 0.001;
+            cfg.hall_di   = 1.0;
+            cfg.hall_stab = HallStabKind::HYPER_RES;
+            cfg.output_dt = 1.0;
+            cfg.rho_floor = 0.02;
+            cfg.p_floor   = 0.005;
+            cfg.subcycle_nonideal = true;
+            cfg.n_subcycle_max    = 100;
+            break;
+        }
+        case 22: { // test 21 但 eta_H=0（纯 Hall MHD，无超电阻）
+            // 缺乏短波耗散，仿真在 t≈5 因 X 点奇点而崩溃
+            const HarrisSheetParams hp;
+            cfg.x0        = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
+            cfg.y0        = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
+            cfg.gamma     = 5.0 / 3.0;
+            cfg.t_end     = 15.0;
+            cfg.bcx       = BC::Periodic;
+            cfg.bcy       = BC::Transmissive;
+            cfg.eta       = 0.0;
+            cfg.eta_H     = 0.0;
+            cfg.hall_di   = 1.0;
+            cfg.hall_stab = HallStabKind::NONE;
+            cfg.output_dt = 1.0;
+            cfg.rho_floor = 0.02;
+            cfg.p_floor   = 0.005;
+            cfg.subcycle_nonideal = true;
+            cfg.n_subcycle_max    = 100;
+            break;
+        }
+        case 23: { // Harris 电流片——Hall MHD + Hall-HLL 扩散稳定化（Path B）
+            // 用 HLL 型哨声波速耗散替代超电阻，无子循环。
+            // dt 由 HLL CFL 主导：约 9e-5 for 128×64（约 2.85× 更严格于 RK4 CFL）
+            // 参考：Iwasaki & Tomida 2025（Hall-HLL 弥散近似）
+            const HarrisSheetParams hp;
+            cfg.x0        = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
+            cfg.y0        = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
+            cfg.gamma     = 5.0 / 3.0;
+            cfg.t_end     = 15.0;
+            cfg.bcx       = BC::Periodic;
+            cfg.bcy       = BC::Transmissive;
+            cfg.eta       = 0.0;
+            cfg.eta_H     = 0.0;
+            cfg.hall_di   = 1.0;
+            cfg.hall_stab = HallStabKind::HALL_HLL;
+            cfg.output_dt = 1.0;
+            cfg.rho_floor = 0.02;
+            cfg.p_floor   = 0.005;
+            break;
+        }
+        case 24: { // 1D 哨声波色散测试（验证 Hall-HLL 过阻尼特性）
+            // 背景：ρ=1，p=0.1，Bx=B₀=1（沿传播方向），δBy=A·cos(kx)，δBz=A·sin(kx)
+            // 解析频率：ω = di·k² = 0.1·(2π)² ≈ 3.95
+            // Hall-HLL 理论阻尼率：γ = (π/2)·ω ≈ 6.2（过阻尼，γ > ω）
+            // 用途：验证 γ/ω = π/2 与 Iwasaki & Tomida 2025 预测一致
+            cfg.x0     = 0.0; cfg.x1 = 1.0;
+            cfg.y0     = 0.0; cfg.y1 = static_cast<double>(ny) / nx;
+            cfg.gamma  = 5.0 / 3.0;
+            cfg.t_end  = 1.0;   // 约 0.63 个哨声波周期；HLL 阻尼在 t≈0.5 完成
+            cfg.bcx    = BC::Periodic;
+            cfg.bcy    = BC::Periodic;
+            cfg.eta    = 0.0;
+            cfg.eta_H  = 0.0;
+            cfg.hall_di   = 0.1;
+            cfg.hall_stab = HallStabKind::HALL_HLL;
+            cfg.output_dt = 0.02;
+            break;
+        }
         default:
             throw std::runtime_error("Unknown test id");
     }
@@ -449,8 +546,9 @@ void sweep_y(Grid& w, int nx, int ny, double dt, double dy, const RunConfig& cfg
 
 double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
                   const RunConfig& cfg, DivergenceController& divb) {
-    double smax = 1e-10, ch_loc = 0.0, max_va2 = 0.0;
-    #pragma omp parallel for collapse(2) reduction(max:smax,ch_loc,max_va2) schedule(static)
+    double smax = 1e-10, ch_loc = 0.0, max_va2 = 0.0, max_b2_rho2 = 0.0;
+    #pragma omp parallel for collapse(2) \
+        reduction(max:smax,ch_loc,max_va2,max_b2_rho2) schedule(static)
     for (int i = 2; i < nx + 2; ++i) {
         for (int j = 2; j < ny + 2; ++j) {
             const Vec& p = w[i][j];
@@ -461,28 +559,35 @@ double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
             double s = sx / dx + sy / dy;
             smax = std::max(smax, s);
             ch_loc = std::max(ch_loc, std::max(sx, sy));
-            // Track max Alfvén speed for Hall CFL: v_A = |B|/sqrt(ρ)
             double B2 = p[5]*p[5] + p[6]*p[6] + p[7]*p[7];
+            // 霍尔 CFL 两种方案分别需要 |B|/√ρ 和 |B|/ρ
             double rho_va = cfg.hall_di > 0.0 ? std::max(p[0], 0.1) : std::max(p[0], 1e-14);
-            max_va2 = std::max(max_va2, B2 / rho_va);
+            max_va2     = std::max(max_va2,    B2 / rho_va);           // 用于 RK4 CFL
+            max_b2_rho2 = std::max(max_b2_rho2, B2 / (rho_va*rho_va)); // 用于 HLL CFL
         }
     }
     divb.update_characteristic_speed(ch_loc);
-    // Hall whistler CFL (RK4 integration).
-    // RK4 is stable for |ω·dt| < 2√2 ≈ 2.83 on the imaginary axis.
-    // ω_max = d_i·(π/mincell)²·v_A, so need d_i·π²·v_A/mincell² · dt < 2.83.
-    // Express as smax contribution: smax_hall = d_i·π²·v_A / (2.83·mincell²).
-    if (cfg.hall_di > 0.0) {
+
+    if (cfg.hall_di > 0.0 && !cfg.subcycle_nonideal) {
         constexpr double pi = 3.14159265358979323846;
         double mincell = std::min(dx, dy);
-        double smax_hall = cfg.hall_di * (pi*pi/2.83) * std::sqrt(max_va2)
-                           / (mincell * mincell);
-        smax = std::max(smax, smax_hall);
+        if (cfg.hall_stab == HallStabKind::HALL_HLL) {
+            // HLL 一阶迎风扩散稳定性：c_w·dt/h ≤ 1
+            // c_w = π·di·max(|B|/ρ)/h → smax_hll = π·di·max(|B|/ρ)/h²
+            double smax_hll = cfg.hall_di * pi * std::sqrt(max_b2_rho2)
+                              / (mincell * mincell);
+            smax = std::max(smax, smax_hll);
+        } else {
+            // RK4 稳定性（|ω·dt| < 2√2 ≈ 2.83），使用 vA = |B|/√ρ
+            double smax_hall = cfg.hall_di * (pi*pi/2.83) * std::sqrt(max_va2)
+                               / (mincell * mincell);
+            smax = std::max(smax, smax_hall);
+        }
     }
     double dt = cfg.cfl / smax;
     if (cfg.eta_H > 0.0) {
         double mincell = std::min(dx, dy);
-        // Explicit Euler stability for biharmonic: dt ≤ h⁴ / (32·η_H).
+        // 显式 Euler 双调和稳定性：dt ≤ h⁴ / (32·η_H)
         double dt_hyper = std::pow(mincell, 4) / (32.0 * cfg.eta_H);
         dt = std::min(dt, dt_hyper);
     }
@@ -773,6 +878,33 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
                     w[i][j] = harris_cell_ic(x, y, HarrisSheetParams{});
                     break;
                 }
+                case 20:
+                case 21:
+                case 22:
+                case 23: {
+                    // Hall + hyper-res (test 20/21)、纯 Hall (test 22) 或 Hall-HLL (test 23)
+                    // 均使用 GEM 动理论密度 IC（与 test 12 相同）
+                    const HarrisSheetParams hp;
+                    Vec ic = harris_cell_ic(x, y, hp);
+                    const double s = 1.0 / std::cosh(y / hp.lam);
+                    ic[0] = 0.2 + s * s;   // GEM：n_bg=0.2，n0=1.0
+                    w[i][j] = ic;
+                    break;
+                }
+                case 24: {
+                    // 1D 哨声波测试：背景场 Bx=1（沿 x），横向扰动 δBy/δBz
+                    constexpr double pi = 3.14159265358979323846;
+                    const double k  = 2.0 * pi / (cfg.x1 - cfg.x0);
+                    const double A  = 0.01;
+                    w[i][j] = { 1.0,                    // ρ
+                                0.0, 0.0, 0.0,          // vx, vy, vz
+                                0.1,                    // p
+                                1.0,                    // Bx（背景场，哨声波沿此方向传播）
+                                A * std::cos(k * x),    // δBy
+                                A * std::sin(k * x),    // δBz（圆偏振）
+                                0.0 };                  // ψ
+                    break;
+                }
                 default:
                     throw std::runtime_error("Unknown test id");
             }
@@ -796,6 +928,9 @@ OutputData run_simulation(const RunConfig& cfg) {
     divb->set_resistivity(cfg.eta);
     divb->set_hall(cfg.hall_di);
     divb->set_hyper_resistivity(cfg.eta_H);
+    divb->set_subcycle_options(cfg.subcycle_nonideal, cfg.n_subcycle_max);
+    divb->set_cfl(cfg.cfl);
+    divb->set_hall_stab(cfg.hall_stab);
     divb->initialize(w, cfg, dx, dy);
 
     double t = 0.0;
@@ -870,6 +1005,7 @@ OutputData run_simulation(const RunConfig& cfg) {
             t_sweepx += elapsed(tc, td);
         }
 
+        divb->set_current_time(t);
         divb->post_step(w, cfg.nx, cfg.ny, dt, Lx, Ly, dx, dy);
         auto tf = Clock::now();
 
@@ -896,8 +1032,12 @@ OutputData run_simulation(const RunConfig& cfg) {
                       << "  max|divB|=" << diag.max_divB
                       << "  l2|divB|=" << diag.l2_divB
                       << "  max|psi|=" << diag.max_psi
-                      << "  max|v|=" << diag.max_v
-                      << '\n';
+                      << "  max|v|=" << diag.max_v;
+            if (cfg.subcycle_nonideal) {
+                int nsub = divb->last_n_sub();
+                std::cout << "  N_sub=" << nsub;
+            }
+            std::cout << '\n';
             divb_log << t << ' ' << diag.l2_divB << '\n';
             if (diag.min_rho < 0 || diag.min_p < 0 || !std::isfinite(diag.max_divB)
                     || !std::isfinite(diag.max_v) || dt < 1e-8 * (t > 0 ? t : 1.0)) {

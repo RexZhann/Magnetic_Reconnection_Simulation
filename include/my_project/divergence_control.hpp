@@ -34,6 +34,23 @@ public:
     // Only the CT controller uses this; all others silently ignore it.
     virtual void set_hyper_resistivity(double /*eta_H*/) {}
 
+    // Enable non-ideal sub-cycling with a safety cap on N_sub.
+    // Only the CT controller uses this; all others silently ignore it.
+    virtual void set_subcycle_options(bool /*enable*/, int /*nmax*/) {}
+
+    // Inform the controller of the current simulation time (used for diagnostic logging).
+    virtual void set_current_time(double /*t*/) {}
+
+    // Pass the CFL number so the sub-cycler can apply the same safety margin.
+    virtual void set_cfl(double /*cfl*/) {}
+
+    // 设置霍尔短波稳定化方案。仅 CT 控制器使用，其他静默忽略。
+    virtual void set_hall_stab(HallStabKind /*hs*/) {}
+
+    // Query the sub-cycle count used in the most recent post_step call.
+    // Returns 1 when sub-cycling was not active.
+    virtual int  last_n_sub() const { return 1; }
+
     // CT interface: fill a contiguous buffer with the face-centered normal B
     // for a 1D sweep row/column. buf must have size >= n+2.
     // For x-sweep of interior row j (0-indexed): buf[i] = Bx_face at interface i (i=1..n+1).
@@ -98,6 +115,14 @@ public:
     void set_resistivity(double eta) override { eta_ = eta; }
     void set_hall(double di) override { hall_di_ = di; }
     void set_hyper_resistivity(double eta_H) override { eta_H_ = eta_H; }
+    void set_subcycle_options(bool enable, int nmax) override {
+        subcycle_nonideal_ = enable;
+        n_subcycle_max_    = nmax;
+    }
+    void set_current_time(double t) override { current_t_ = t; }
+    void set_cfl(double cfl) override { cfl_ = cfl; }
+    void set_hall_stab(HallStabKind hs) override { hall_stab_ = hs; }
+    int  last_n_sub() const override { return last_n_sub_; }
     void initialize(Grid& w, const RunConfig& cfg, double dx, double dy) override;
     void pre_step(Grid& w, int nx, int ny, double dt, double dx, double dy) override;
     void post_step(Grid& w, int nx, int ny, double dt, double Lx, double Ly,
@@ -129,6 +154,13 @@ private:
     double eta_H_   = 0.0;
     BC bcx_ = BC::Transmissive;
     BC bcy_ = BC::Transmissive;
+    // Sub-cycling state
+    bool   subcycle_nonideal_ = false;
+    int    n_subcycle_max_    = 100;
+    double current_t_         = 0.0;
+    double cfl_               = 0.3;  // CFL safety factor (matches compute_dt)
+    int    last_n_sub_        = 1;    // set each post_step; readable via last_n_sub()
+    HallStabKind hall_stab_  = HallStabKind::NONE;
 
     void initialize_faces_from_problem(const Grid& w, const RunConfig& cfg, double dx, double dy);
     void fill_faces_from_cell_centered(const Grid& w, int nx, int ny);
@@ -154,6 +186,12 @@ private:
     void update_faces_from_emf(int nx, int ny, double dt, double dx, double dy);
     void sync_cell_centered_from_faces(Grid& w, int nx, int ny) const;
     void apply_face_bc(int nx, int ny);
+
+    // HLL 型哨声波速耗散（Path B）。
+    // 向角点 EMF 叠加一阶迎风扩散：δEz[I][J] += (c_w/2)·ΔBy_x − (c_w/2)·ΔBx_y
+    // 稳定性条件：c_w·dt/mincell ≤ 1（由 compute_dt 中的 smax_hll 项保证）
+    // 参考：Iwasaki & Tomida 2025（Hall-HLL 弥散近似）
+    void add_hall_hll_stabilization(Grid& w, int nx, int ny, double dx, double dy);
 };
 
 } // namespace my_project

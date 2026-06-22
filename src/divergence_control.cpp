@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <omp.h>
 
@@ -54,20 +55,140 @@ void CTDivergenceControl::pre_step(Grid& /*w*/, int /*nx*/, int /*ny*/,
 void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
                                     double dt, double /*Lx*/, double /*Ly*/,
                                     double dx, double dy) {
+    // Step A: assemble ideal corner EMF from Riemann-solver interface fluxes.
     compute_corner_emf_from_interface_emfs(nx, ny);
-    add_resistive_correction(w, nx, ny, dt, dx, dy);   // no-op when eta_ == 0
-    add_hyper_resistive_correction(nx, ny, dx, dy);     // no-op when eta_H_ == 0
-    add_hall_correction(w, nx, ny, dt, dx, dy);         // no-op when hall_di_ == 0
-    update_faces_from_emf(nx, ny, dt, dx, dy);
-    sync_cell_centered_from_faces(w, nx, ny);
+
+    // ------------------------------------------------------------------
+    // Determine sub-cycle count for the non-ideal block.
+    // N_sub == 1 → original single-step path, bitwise identical.
+    // ------------------------------------------------------------------
+    int    N_sub   = 1;
+    double dt_sub  = dt;
+    double dt_eta  = std::numeric_limits<double>::max();
+    double dt_hall = std::numeric_limits<double>::max();
+
+    if (subcycle_nonideal_ && (eta_ > 0.0 || hall_di_ > 0.0)) {
+        constexpr double pi = 3.14159265358979323846;
+        double mincell = std::min(dx, dy);
+
+        // Resistive (parabolic) CFL: dt_eta = mincell² / (2 η)
+        if (eta_ > 0.0)
+            dt_eta = mincell * mincell / (2.0 * eta_);
+
+        // 霍尔稳定化子步 CFL —— 根据方案选择不同公式：
+        //   HYPER_RES / NONE : RK4 稳定性，使用 vA = |B|/√ρ
+        //   HALL_HLL         : 一阶迎风扩散，使用 |B|/ρ（更严格）
+        if (hall_di_ > 0.0) {
+            if (hall_stab_ == HallStabKind::HALL_HLL) {
+                // HLL 稳定性条件：c_w·dt/h ≤ 1，c_w = π·di·|B|/(ρ·h)
+                // → dt = h² / (π·di·max(|B|/ρ))
+                double max_b2_rho2 = 1e-14;
+                #pragma omp parallel for collapse(2) reduction(max:max_b2_rho2) schedule(static)
+                for (int i = 2; i < nx + 2; ++i)
+                    for (int j = 2; j < ny + 2; ++j) {
+                        double rho = std::max(w[i][j][0], 0.1);
+                        double B2  = w[i][j][5]*w[i][j][5]
+                                   + w[i][j][6]*w[i][j][6]
+                                   + w[i][j][7]*w[i][j][7];
+                        max_b2_rho2 = std::max(max_b2_rho2, B2 / (rho * rho));
+                    }
+                dt_hall = cfl_ * mincell * mincell
+                          / (pi * hall_di_ * std::sqrt(max_b2_rho2));
+            } else {
+                // RK4 稳定性（|ω·dt| < 2√2 ≈ 2.83），使用 vA = |B|/√ρ
+                double max_va2 = 1e-14;
+                #pragma omp parallel for collapse(2) reduction(max:max_va2) schedule(static)
+                for (int i = 2; i < nx + 2; ++i)
+                    for (int j = 2; j < ny + 2; ++j) {
+                        double rho = std::max(w[i][j][0], 0.1);
+                        double B2  = w[i][j][5]*w[i][j][5]
+                                   + w[i][j][6]*w[i][j][6]
+                                   + w[i][j][7]*w[i][j][7];
+                        max_va2 = std::max(max_va2, B2 / rho);
+                    }
+                dt_hall = cfl_ * (2.83 / (pi*pi)) * mincell * mincell
+                          / (hall_di_ * std::sqrt(max_va2));
+            }
+        }
+
+        dt_sub   = std::min(dt_eta, dt_hall);
+        int N_raw = static_cast<int>(std::ceil(dt / dt_sub));
+        if (N_raw > n_subcycle_max_) {
+            std::fprintf(stderr,
+                "[subcycle] WARNING t=%.6g: dt_hyp=%.3e dt_sub=%.3e"
+                " uncapped N=%d -> clamped to %d\n",
+                current_t_, dt, dt_sub, N_raw, n_subcycle_max_);
+            N_raw = n_subcycle_max_;
+        }
+        N_sub = std::max(1, N_raw);
+    }
+    last_n_sub_ = N_sub;
+
+    // ------------------------------------------------------------------
+    // N_sub == 1: original single-step path (bitwise identical to old code).
+    // ------------------------------------------------------------------
+    // 根据稳定化方案选择调用哪个函数（单步和子循环路径均使用此 lambda）
+    const auto apply_stab = [&](double dt_loc) {
+        switch (hall_stab_) {
+            case HallStabKind::HYPER_RES:
+                add_hyper_resistive_correction(nx, ny, dx, dy);
+                break;
+            case HallStabKind::HALL_HLL:
+                add_hall_hll_stabilization(w, nx, ny, dx, dy);
+                break;
+            case HallStabKind::NONE:
+            default:
+                break;
+        }
+        (void)dt_loc;
+    };
+
+    if (N_sub == 1) {
+        add_resistive_correction(w, nx, ny, dt, dx, dy);
+        apply_stab(dt);
+        add_hall_correction(w, nx, ny, dt, dx, dy);
+        update_faces_from_emf(nx, ny, dt, dx, dy);
+        sync_cell_centered_from_faces(w, nx, ny);
+    } else {
+        // ------------------------------------------------------------------
+        // N_sub > 1: operator-split sub-cycling.
+        //   1. Apply the ideal Faraday update once with the full dt_hyp.
+        //   2. Sub-cycle the non-ideal block N_sub times with dt_local.
+        // face_.emf_z currently holds the ideal EMF from step A.
+        // ------------------------------------------------------------------
+        const double dt_local = dt / static_cast<double>(N_sub);
+
+        std::fprintf(stdout,
+            "[subcycle] t=%.6g dt_hyp=%.3e  dt_eta=%.3e dt_hall=%.3e"
+            "  dt_sub=%.3e  N_sub=%d\n",
+            current_t_, dt,
+            (eta_     > 0.0) ? dt_eta  : -1.0,
+            (hall_di_ > 0.0) ? dt_hall : -1.0,
+            dt_sub, N_sub);
+
+        // 步骤 1：理想 Faraday 推进（一次，全局 dt_hyp）
+        update_faces_from_emf(nx, ny, dt, dx, dy);
+        sync_cell_centered_from_faces(w, nx, ny);
+
+        // 步骤 2：非理想子循环（每步使用当前面心 B）
+        for (int sub = 0; sub < N_sub; ++sub) {
+            // 清零角点 EMF：每子步仅累积非理想贡献
+            for (int I = 0; I <= nx; ++I)
+                std::fill(face_.emf_z[I].begin(), face_.emf_z[I].end(), 0.0);
+
+            add_resistive_correction(w, nx, ny, dt_local, dx, dy);
+            apply_stab(dt_local);
+            add_hall_correction(w, nx, ny, dt_local, dx, dy);
+            update_faces_from_emf(nx, ny, dt_local, dx, dy);
+            sync_cell_centered_from_faces(w, nx, ny);
+        }
+    }
 
     // ψ is not used by CT.
     #pragma omp parallel for collapse(2) schedule(static)
-    for (int i = 2; i < nx + 2; ++i) {
-        for (int j = 2; j < ny + 2; ++j) {
+    for (int i = 2; i < nx + 2; ++i)
+        for (int j = 2; j < ny + 2; ++j)
             w[i][j][8] = 0.0;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -122,10 +243,9 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
                       return -std::sin(2.0*pi*y); }
             case 4: { constexpr double pi=3.14159265358979323846; (void)x;(void)y;
                       return 2.5/std::sqrt(4.0*pi); }
-            case 11: case 12: {
-                // Harris sheet: exact face Bx via vector-potential line integral
-                // bx = [Az(x, y+Δy/2) − Az(x, y−Δy/2)] / Δy
-                // Guarantees ∇·B = 0 to machine precision (Tóth 2000, §4.1).
+            case 11: case 12:
+            case 19: case 20: case 21: case 22: case 23: {
+                // Harris 电流片：由矢势线积分解析给出面心 Bx，初始 ∇·B = 0（机器精度）
                 return harris_bx_face(x, y, dy, HarrisSheetParams{});
             }
             case 15: {
@@ -149,10 +269,9 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
             case 3: { constexpr double pi=3.14159265358979323846; (void)y;
                       return std::sin(4.0*pi*x); }
             case 4:  (void)x;(void)y; return 0.0;
-            case 11: case 12: {
-                // Harris sheet: exact face By via vector-potential line integral
-                // by = −[Az(x+Δx/2, y) − Az(x−Δx/2, y)] / Δx
-                // Guarantees ∇·B = 0 to machine precision (Tóth 2000, §4.1).
+            case 11: case 12:
+            case 19: case 20: case 21: case 22: case 23: {
+                // Harris 电流片：由矢势线积分解析给出面心 By，初始 ∇·B = 0（机器精度）
                 return harris_by_face(x, y, dx, HarrisSheetParams{});
             }
             case 15: {
@@ -717,6 +836,68 @@ void CTDivergenceControl::add_hall_correction(Grid& w, int nx, int ny,
         for (int j = 0; j < ny; ++j)
             w[i+2][j+2][7] += dt * (kBz1[i][j] + 2.0*kBz2[i][j]
                                    + 2.0*kBz3[i][j] + kBz4[i][j]) / 6.0;
+}
+
+// ---------------------------------------------------------------------------
+// Hall-HLL 哨声波速 HLL 1 阶迎风扩散稳定化（Path B）
+//
+// 推导：哨声波以波速 c_w = π·di·|B|_角/(ρ_角·mincell) 沿磁场方向传播。
+// 将该速度作为 HLL 扩散系数，对 By 和 Bx 各施加一阶迎风差分，
+// 等价于向角点 EMF 添加：
+//   δEz[I][J] = +(c_w/2)·(By_right − By_left)   ← By 在 x 方向正扩散
+//              −(c_w/2)·(Bx_above − Bx_below)   ← Bx 在 y 方向正扩散
+//
+// 对应 ∂By/∂t 贡献：+(c_w·dx/2)·∂²By/∂x²  > 0（稳定）
+// 对应 ∂Bx/∂t 贡献：+(c_w·dy/2)·∂²Bx/∂y²  > 0（稳定）
+//
+// 稳定性条件：c_w·dt/mincell ≤ 1，由 compute_dt 中的 smax_hll 项保证。
+// 注意：该方案将哨声波近似为纯扩散（过阻尼，γ/ω ≈ π/2），
+// 与 Iwasaki & Tomida (2025) Hall-HLL 描述一致。
+// ---------------------------------------------------------------------------
+void CTDivergenceControl::add_hall_hll_stabilization(Grid& w, int nx, int ny,
+                                                     double dx, double dy) {
+    if (hall_di_ <= 0.0) return;
+    constexpr double pi   = 3.14159265358979323846;
+    const double mincell  = std::min(dx, dy);
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int I = 0; I <= nx; ++I) {
+        for (int J = 0; J <= ny; ++J) {
+            // 角点 (I,J) 对应周围四个单元格：w[I+1][J+1]..w[I+2][J+2]（含 2 层 ghost）
+            double rho_c = 0.25 * (w[I+1][J+1][0] + w[I+2][J+1][0]
+                                 + w[I+1][J+2][0] + w[I+2][J+2][0]);
+            rho_c = std::max(rho_c, 0.1);  // 与 Hall CFL floor 一致
+
+            double Bx_c = 0.25 * (w[I+1][J+1][5] + w[I+2][J+1][5]
+                                 + w[I+1][J+2][5] + w[I+2][J+2][5]);
+            double By_c = 0.25 * (w[I+1][J+1][6] + w[I+2][J+1][6]
+                                 + w[I+1][J+2][6] + w[I+2][J+2][6]);
+            double Bz_c = 0.25 * (w[I+1][J+1][7] + w[I+2][J+1][7]
+                                 + w[I+1][J+2][7] + w[I+2][J+2][7]);
+            double B2_c = Bx_c*Bx_c + By_c*By_c + Bz_c*Bz_c;
+
+            // c_w = π·di·|B|_角/(ρ_角·mincell)
+            const double c_w = pi * hall_di_ * std::sqrt(B2_c) / (rho_c * mincell);
+
+            // face_.by[i][J]：y 向面，i = 0..nx-1，J = 0..ny
+            // 角点 (I,J) 右侧 By face：i = I（若 I < nx），左侧：i = I-1
+            int i_right = (bcx_ == BC::Periodic) ? (I < nx ? I : 0)
+                                                  : (I < nx ? I : nx-1);
+            int i_left  = (bcx_ == BC::Periodic) ? (I > 0 ? I-1 : nx-1)
+                                                  : (I > 0 ? I-1 : 0);
+            double jump_by = face_.by[i_right][J] - face_.by[i_left][J];
+
+            // face_.bx[I][j]：x 向面，I = 0..nx，j = 0..ny-1
+            // 角点 (I,J) 上方 Bx face：j = J（若 J < ny），下方：j = J-1
+            int j_above = (bcy_ == BC::Periodic) ? (J < ny ? J : 0)
+                                                  : (J < ny ? J : ny-1);
+            int j_below = (bcy_ == BC::Periodic) ? (J > 0 ? J-1 : ny-1)
+                                                  : (J > 0 ? J-1 : 0);
+            double jump_bx = face_.bx[I][j_above] - face_.bx[I][j_below];
+
+            face_.emf_z[I][J] += (c_w * 0.5) * jump_by - (c_w * 0.5) * jump_bx;
+        }
+    }
 }
 
 } // namespace my_project
