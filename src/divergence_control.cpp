@@ -876,8 +876,12 @@ void CTDivergenceControl::add_hall_hll_stabilization(Grid& w, int nx, int ny,
                                  + w[I+1][J+2][7] + w[I+2][J+2][7]);
             double B2_c = Bx_c*Bx_c + By_c*By_c + Bz_c*Bz_c;
 
+            // B²_floor = 0.01（|B_floor|=0.1 = 10% B₀）：保证磁零点（X 点）处 c_w 有最小值，
+            // 防止 Hall RK4 持续注入的 grid-scale 噪声因 c_w→0 而无法被 HLL 耗散压制。
+            // 对应 compute_dt 中同步设置的 max_b2_rho2 下限，CFL 一致。
+            constexpr double B2_floor = 0.01;
             // c_w = π·di·|B|_角/(ρ_角·mincell)
-            const double c_w = pi * hall_di_ * std::sqrt(B2_c) / (rho_c * mincell);
+            const double c_w = pi * hall_di_ * std::sqrt(std::max(B2_c, B2_floor)) / (rho_c * mincell);
 
             // face_.by[i][J]：y 向面，i = 0..nx-1，J = 0..ny
             // 角点 (I,J) 右侧 By face：i = I（若 I < nx），左侧：i = I-1

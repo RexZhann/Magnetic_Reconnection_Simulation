@@ -574,6 +574,12 @@ double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
         if (cfg.hall_stab == HallStabKind::HALL_HLL) {
             // HLL 一阶迎风扩散稳定性：c_w·dt/h ≤ 1
             // c_w = π·di·max(|B|/ρ)/h → smax_hll = π·di·max(|B|/ρ)/h²
+            // B²_floor = 0.01（与 add_hall_hll_stabilization 一致），保证 CFL 与 c_w_floor 相容：
+            // smax_floor = π·di·√(B²_floor)/ρ_floor/h² = π·1·0.1/(0.1·h²) = π/h²
+            constexpr double B2_floor_cfl = 0.01;
+            constexpr double rho_fl_cfl   = 0.1;
+            double b2_rho2_floor = B2_floor_cfl / (rho_fl_cfl * rho_fl_cfl);
+            max_b2_rho2 = std::max(max_b2_rho2, b2_rho2_floor);
             double smax_hll = cfg.hall_di * pi * std::sqrt(max_b2_rho2)
                               / (mincell * mincell);
             smax = std::max(smax, smax_hll);
