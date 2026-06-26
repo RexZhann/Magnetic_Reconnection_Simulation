@@ -65,8 +65,8 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
     // ------------------------------------------------------------------
     int    N_sub   = 1;
     double dt_sub  = dt;
-    double dt_eta  = std::numeric_limits<double>::max();
-    double dt_hall = std::numeric_limits<double>::max();
+    double dt_eta  = std::numeric_limits<double>::infinity();  // +∞ = 限制不适用
+    double dt_hall = std::numeric_limits<double>::infinity();  // +∞ = 限制不适用
 
     if (subcycle_nonideal_ && (eta_ > 0.0 || hall_di_ > 0.0)) {
         constexpr double pi = 3.14159265358979323846;
@@ -161,11 +161,8 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
 
         std::fprintf(stdout,
             "[subcycle] t=%.6g dt_hyp=%.3e  dt_eta=%.3e dt_hall=%.3e"
-            "  dt_sub=%.3e  N_sub=%d\n",
-            current_t_, dt,
-            (eta_     > 0.0) ? dt_eta  : -1.0,
-            (hall_di_ > 0.0) ? dt_hall : -1.0,
-            dt_sub, N_sub);
+            "  dt_sub=%.3e  N_sub=%d  dt_local=%.3e\n",
+            current_t_, dt, dt_eta, dt_hall, dt_sub, N_sub, dt_local);
 
         // 步骤 1：理想 Faraday 推进（一次，全局 dt_hyp）
         update_faces_from_emf(nx, ny, dt, dx, dy);
