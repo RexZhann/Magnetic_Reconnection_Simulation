@@ -33,7 +33,7 @@ enum class DivBCleaningKind { None = 0, GLM = 1, CT = 2 };
 // 霍尔短波稳定化方案（仅 CT 模式有效）。
 // NONE      : 无额外稳定化，依赖 RK4 Hall CFL 本身
 // HYPER_RES : 4 阶超电阻 −η_H ∇²Jz（原有方案，test 20/21）
-// HALL_HLL  : 哨声波速度 HLL 1 阶迎风扩散（Path B，test 23）
+// HALL_HLL  : 哨声波速度 HLL 1 阶迎风扩散（Path B，test 23）// experimental, deprioritized
 enum class HallStabKind { NONE = 0, HYPER_RES = 1, HALL_HLL = 2 };
 
 struct RunConfig {

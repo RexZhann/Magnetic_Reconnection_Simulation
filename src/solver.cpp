@@ -390,6 +390,7 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             break;
         }
         case 23: { // Harris 电流片——Hall MHD + Hall-HLL 扩散稳定化（Path B）
+            // *** Hall-HLL 开发已停止（实验性），保留供参考；主线使用 test 21 (HYPER_RES) ***
             // 用 HLL 型哨声波速耗散替代超电阻，无子循环。
             // dt 由 HLL CFL 主导：约 9e-5 for 128×64（约 2.85× 更严格于 RK4 CFL）
             // 参考：Iwasaki & Tomida 2025（Hall-HLL 弥散近似）
@@ -410,6 +411,7 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             break;
         }
         case 24: { // 1D 哨声波色散测试（验证 Hall-HLL 过阻尼特性）
+            // *** Hall-HLL 开发已停止（实验性），保留供参考；主线使用 test 21 (HYPER_RES) ***
             // 背景：ρ=1，p=0.1，Bx=B₀=1（沿传播方向），δBy=A·cos(kx)，δBz=A·sin(kx)
             // 解析频率：ω = di·k² = 0.1·(2π)² ≈ 3.95
             // Hall-HLL 理论阻尼率：γ = (π/2)·ω ≈ 6.2（过阻尼，γ > ω）
@@ -546,9 +548,9 @@ void sweep_y(Grid& w, int nx, int ny, double dt, double dy, const RunConfig& cfg
 
 double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
                   const RunConfig& cfg, DivergenceController& divb) {
-    double smax = 1e-10, ch_loc = 0.0, max_va2 = 0.0, max_b2_rho2 = 0.0;
+    double smax = 1e-10, ch_loc = 0.0, max_va2 = 0.0, max_b2_rho2 = 0.0, max_cf2_hll = 0.0;
     #pragma omp parallel for collapse(2) \
-        reduction(max:smax,ch_loc,max_va2,max_b2_rho2) schedule(static)
+        reduction(max:smax,ch_loc,max_va2,max_b2_rho2,max_cf2_hll) schedule(static)
     for (int i = 2; i < nx + 2; ++i) {
         for (int j = 2; j < ny + 2; ++j) {
             const Vec& p = w[i][j];
@@ -561,9 +563,11 @@ double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
             ch_loc = std::max(ch_loc, std::max(sx, sy));
             double B2 = p[5]*p[5] + p[6]*p[6] + p[7]*p[7];
             // 霍尔 CFL 两种方案分别需要 |B|/√ρ 和 |B|/ρ
-            double rho_va = cfg.hall_di > 0.0 ? std::max(p[0], 0.1) : std::max(p[0], 1e-14);
-            max_va2     = std::max(max_va2,    B2 / rho_va);           // 用于 RK4 CFL
-            max_b2_rho2 = std::max(max_b2_rho2, B2 / (rho_va*rho_va)); // 用于 HLL CFL
+            double rho_va = cfg.hall_di > 0.0 ? std::max(p[0], cfg.rho_floor) : std::max(p[0], 1e-14);
+            max_va2     = std::max(max_va2,    B2 / rho_va);                        // 用于 RK4 CFL
+            max_b2_rho2 = std::max(max_b2_rho2, B2 / (rho_va*rho_va));            // 用于 HLL CFL
+            if (cfg.hall_di > 0.0 && cfg.hall_stab == HallStabKind::HALL_HLL)     // 用于 c_stab CFL（仅 HALL_HLL）
+                max_cf2_hll = std::max(max_cf2_hll, (cfg.gamma * p[4] + B2) / rho_va);
         }
     }
     divb.update_characteristic_speed(ch_loc);
@@ -572,16 +576,12 @@ double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
         constexpr double pi = 3.14159265358979323846;
         double mincell = std::min(dx, dy);
         if (cfg.hall_stab == HallStabKind::HALL_HLL) {
-            // HLL 一阶迎风扩散稳定性：c_w·dt/h ≤ 1
-            // c_w = π·di·max(|B|/ρ)/h → smax_hll = π·di·max(|B|/ρ)/h²
-            // B²_floor = 0.01（与 add_hall_hll_stabilization 一致），保证 CFL 与 c_w_floor 相容：
-            // smax_floor = π·di·√(B²_floor)/ρ_floor/h² = π·1·0.1/(0.1·h²) = π/h²
-            constexpr double B2_floor_cfl = 0.01;
-            constexpr double rho_fl_cfl   = 0.1;
-            double b2_rho2_floor = B2_floor_cfl / (rho_fl_cfl * rho_fl_cfl);
-            max_b2_rho2 = std::max(max_b2_rho2, b2_rho2_floor);
-            double smax_hll = cfg.hall_di * pi * std::sqrt(max_b2_rho2)
-                              / (mincell * mincell);
+            // c_stab = c_f + c_w 稳定性条件：c_stab·dt/h ≤ 1
+            // c_f_max = sqrt(max(γp+B²)/ρ)：快磁声速，在磁零点退化为声速（物理底）
+            // c_w_max = π·di·max(|B|/ρ)：哨声波速（不加人工常数 floor）
+            double c_f_max  = std::sqrt(max_cf2_hll);
+            double c_w_max  = cfg.hall_di * pi * std::sqrt(max_b2_rho2);
+            double smax_hll = (c_f_max + c_w_max) / mincell;
             smax = std::max(smax, smax_hll);
         } else {
             // RK4 稳定性（|ω·dt| < 2√2 ≈ 2.83），使用 vA = |B|/√ρ

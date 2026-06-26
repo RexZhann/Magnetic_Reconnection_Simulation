@@ -161,6 +161,7 @@ private:
     double cfl_               = 0.3;  // CFL safety factor (matches compute_dt)
     int    last_n_sub_        = 1;    // set each post_step; readable via last_n_sub()
     HallStabKind hall_stab_  = HallStabKind::NONE;
+    double rho_floor_        = 0.02;  // 与 cfg.rho_floor 保持一致，由 initialize 写入
 
     void initialize_faces_from_problem(const Grid& w, const RunConfig& cfg, double dx, double dy);
     void fill_faces_from_cell_centered(const Grid& w, int nx, int ny);
@@ -191,7 +192,7 @@ private:
     // 向角点 EMF 叠加一阶迎风扩散：δEz[I][J] += (c_w/2)·ΔBy_x − (c_w/2)·ΔBx_y
     // 稳定性条件：c_w·dt/mincell ≤ 1（由 compute_dt 中的 smax_hll 项保证）
     // 参考：Iwasaki & Tomida 2025（Hall-HLL 弥散近似）
-    void add_hall_hll_stabilization(Grid& w, int nx, int ny, double dx, double dy);
+    void add_hall_hll_stabilization(Grid& w, int nx, int ny, double dx, double dy); // experimental, deprioritized
 };
 
 } // namespace my_project
