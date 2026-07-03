@@ -39,6 +39,12 @@ int main(int argc, char* argv[]) {
 
         RunConfig cfg = make_config_for_test(test, nx, ny, divb, solver);
 
+        // CLI 参数 6–8：覆盖 η_H、t_end 和输出标签（均可选）
+        if (argc > 6) { double v = std::atof(argv[6]); if (v >= 0.0) cfg.eta_H = v; }
+        if (argc > 7) { double v = std::atof(argv[7]); if (v >  0.0) cfg.t_end = v; }
+        if (argc > 8) cfg.label = std::string(argv[8]);
+        if (argc > 9) { double v = std::atof(argv[9]); if (v > 0.0) cfg.psi0 = v; }
+
         std::cout << "Test " << cfg.test << ", " << cfg.nx << "x" << cfg.ny
                   << ", " << (cfg.solver == SolverKind::FORCE ? "FORCE" : "HLLD")
                   << ", divB=" << divb_name(cfg.divb)

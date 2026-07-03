@@ -47,6 +47,9 @@ public:
     // 设置霍尔短波稳定化方案。仅 CT 控制器使用，其他静默忽略。
     virtual void set_hall_stab(HallStabKind /*hs*/) {}
 
+    // driven reconnection：y 边界指定恒定 E_z（0 = 关闭）。仅 CT 控制器使用。
+    virtual void set_driven_ez(double /*ez*/) {}
+
     // Query the sub-cycle count used in the most recent post_step call.
     // Returns 1 when sub-cycling was not active.
     virtual int  last_n_sub() const { return 1; }
@@ -122,6 +125,7 @@ public:
     void set_current_time(double t) override { current_t_ = t; }
     void set_cfl(double cfl) override { cfl_ = cfl; }
     void set_hall_stab(HallStabKind hs) override { hall_stab_ = hs; }
+    void set_driven_ez(double ez) override { driven_ez_ = ez; }
     int  last_n_sub() const override { return last_n_sub_; }
     void initialize(Grid& w, const RunConfig& cfg, double dx, double dy) override;
     void pre_step(Grid& w, int nx, int ny, double dt, double dx, double dy) override;
@@ -162,6 +166,7 @@ private:
     int    last_n_sub_        = 1;    // set each post_step; readable via last_n_sub()
     HallStabKind hall_stab_  = HallStabKind::NONE;
     double rho_floor_        = 0.02;  // 与 cfg.rho_floor 保持一致，由 initialize 写入
+    double driven_ez_        = 0.0;   // driven reconnection：y 边界恒定 E_z（0 = 关闭）
 
     void initialize_faces_from_problem(const Grid& w, const RunConfig& cfg, double dx, double dy);
     void fill_faces_from_cell_centered(const Grid& w, int nx, int ny);
@@ -184,6 +189,10 @@ private:
     // No-op when hall_di_ == 0.
     void add_hall_correction(Grid& w, int nx, int ny,
                              double dt, double dx, double dy);
+    // driven BC：把 J=0（下）和 J=ny（上）两排角点 EMF 直接设为 value。
+    // 任意角点 EMF 值都不破坏 CT 的离散 div-B=0（旋度的散度恒为零）。
+    // 常数 E_z 沿边界排 → 边界 By face 增量为零，只向边界 Bx face 注入通量。
+    void override_inflow_ez(int nx, int ny, double value);
     void update_faces_from_emf(int nx, int ny, double dt, double dx, double dy);
     void sync_cell_centered_from_faces(Grid& w, int nx, int ny) const;
     void apply_face_bc(int nx, int ny);

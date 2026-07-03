@@ -1,12 +1,14 @@
 #include "my_project/solver.hpp"
 
 #include "my_project/harris_sheet.hpp"
+#include "my_project/asym_harris_sheet.hpp"
 #include "my_project/riemann.hpp"
 #include "my_project/state.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -21,6 +23,13 @@ namespace my_project {
 
 namespace {
 using Clock = std::chrono::steady_clock;
+
+// 返回该配置的输出目录（末尾无斜杠）。
+// label 非空时为 output/{label}，否则为 output。
+std::string cfg_outdir(const RunConfig& cfg) {
+    return cfg.label.empty() ? "output" : "output/" + cfg.label;
+}
+
 using Sec = std::chrono::duration<double>;
 
 double elapsed(Clock::time_point a, Clock::time_point b) {
@@ -427,6 +436,25 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.hall_di   = 0.1;
             cfg.hall_stab = HallStabKind::HALL_HLL;
             cfg.output_dt = 0.02;
+            break;
+        }
+        case 25: { // 非对称磁场重联（B1=1, B2=2, ρ1=2, ρ2=1；X点偏向弱场侧 y>0）
+            const AsymHarrisParams ap;
+            cfg.x0        = -0.5 * ap.Lx; cfg.x1 = 0.5 * ap.Lx;
+            cfg.y0        = -0.5 * ap.Ly; cfg.y1 = 0.5 * ap.Ly;
+            cfg.gamma     = 5.0 / 3.0;
+            cfg.t_end     = 20.0;
+            cfg.bcx       = BC::Transmissive;  // x 方向改为出流，防止重联出流周期性绕回
+            cfg.bcy       = BC::Transmissive;
+            cfg.eta       = 0.0;
+            cfg.eta_H     = 0.001;
+            cfg.hall_di   = 1.0;
+            cfg.hall_stab = HallStabKind::HYPER_RES;
+            cfg.output_dt = 1.0;
+            cfg.rho_floor = 0.02;
+            cfg.p_floor   = 0.005;
+            cfg.subcycle_nonideal = true;
+            cfg.n_subcycle_max    = 100;
             break;
         }
         default:
@@ -911,6 +939,12 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
                                 0.0 };                  // ψ
                     break;
                 }
+                case 25: {
+                    AsymHarrisParams ap25;
+                    ap25.psi0 = cfg.psi0;
+                    w[i][j] = asym_cell_ic(x, y, ap25);
+                    break;
+                }
                 default:
                     throw std::runtime_error("Unknown test id");
             }
@@ -947,6 +981,10 @@ OutputData run_simulation(const RunConfig& cfg) {
     if (cfg.rho_floor > 0.0)
         std::cout << "  density floor = " << cfg.rho_floor << ",  p_floor = " << cfg.p_floor << "\n";
 
+    // 确保输出目录存在（label 非空时为 output/{label}，否则为 output）
+    // 必须在写 snap000 之前创建，否则首帧快照会因目录不存在而静默失败
+    std::filesystem::create_directories(cfg_outdir(cfg));
+
     // Snapshot output: write at t=0, then every output_dt.
     const bool do_snaps = cfg.output_dt > 0.0;
     int snap_idx = 0;
@@ -958,7 +996,7 @@ OutputData run_simulation(const RunConfig& cfg) {
     }
 
     // L2 divB log: one line per diagnostic interval.
-    const std::string divb_log_path = "output/test" + std::to_string(cfg.test) + "_"
+    const std::string divb_log_path = cfg_outdir(cfg) + "/test" + std::to_string(cfg.test) + "_"
         + std::to_string(cfg.nx) + "x" + std::to_string(cfg.ny)
         + solver_suffix(cfg.solver) + divb_suffix(cfg.divb) + "_divBl2.log";
     std::ofstream divb_log(divb_log_path);
@@ -1080,7 +1118,7 @@ void write_snapshot_file(const Grid& w,
     const double dx = (cfg.x1 - cfg.x0) / cfg.nx;
     const double dy = (cfg.y1 - cfg.y0) / cfg.ny;
     std::ostringstream ss;
-    ss << "output/test" << cfg.test << "_"
+    ss << cfg_outdir(cfg) << "/test" << cfg.test << "_"
        << cfg.nx << "x" << cfg.ny
        << solver_suffix(cfg.solver) << divb_suffix(cfg.divb)
        << "_snap" << std::setw(3) << std::setfill('0') << snap_idx << ".dat";
@@ -1104,8 +1142,7 @@ void write_snapshot_file(const Grid& w,
 void write_output_file(const OutputData& out, const RunConfig& cfg) {
     const double dx = (cfg.x1 - cfg.x0) / cfg.nx;
     const double dy = (cfg.y1 - cfg.y0) / cfg.ny;
-    const std::string folder = "output/";
-    const std::string filename = folder + "test" + std::to_string(cfg.test) + "_"
+    const std::string filename = cfg_outdir(cfg) + "/test" + std::to_string(cfg.test) + "_"
         + std::to_string(cfg.nx) + "x" + std::to_string(cfg.ny)
         + solver_suffix(cfg.solver) + divb_suffix(cfg.divb) + ".dat";
     std::ofstream file(filename);

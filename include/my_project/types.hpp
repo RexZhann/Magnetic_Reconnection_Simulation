@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 
 namespace my_project {
@@ -88,6 +89,20 @@ struct RunConfig {
     // 霍尔稳定化方案选择（见 HallStabKind 注释）。
     // 默认 NONE：依赖 RK4 Hall CFL；test 20/21 显式设为 HYPER_RES；test 23 设为 HALL_HLL。
     HallStabKind hall_stab = HallStabKind::NONE;
+
+    // 输出标签：若非空，输出文件写入 output/{label}/ 子目录。
+    // CLI 第 8 参数可覆盖。为空时与旧版行为一致（写入 output/）。
+    std::string label = "";
+
+    // test 25 非对称重联扰动幅值 ψ₀（CLI 第 9 参数可覆盖；默认 0.2）
+    double psi0 = 0.2;
+
+    // driven reconnection（test 26）：y 方向 inflow 边界指定恒定 out-of-plane
+    // 电场 E_z（代码符号约定，0 = 关闭）。CT 更新中把 J=0 和 J=ny 两排角点
+    // EMF 直接设为该值，通过 Faraday 定律持续注入上游磁通（E×B 入流）。
+    // 只对 CT + bcy=Transmissive 生效。注意符号：本问题重联 E_z < 0
+    // （X 点 Jz < 0），所以驱动值也必须为负才是入流方向。
+    double driven_ez = 0.0;
 };
 
 struct Diagnostics {

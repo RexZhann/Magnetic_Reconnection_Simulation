@@ -1,5 +1,6 @@
 #include "my_project/divergence_control.hpp"
 #include "my_project/harris_sheet.hpp"
+#include "my_project/asym_harris_sheet.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -148,6 +149,9 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
         add_resistive_correction(w, nx, ny, dt, dx, dy);
         apply_stab(dt);
         add_hall_correction(w, nx, ny, dt, dx, dy);
+        // driven BC：所有贡献叠加完后，把 y 边界两排角点 EMF 覆写为指定常数，
+        // 保证边界 E_z 的时间积分恰为 driven_ez_·dt
+        if (driven_ez_ != 0.0) override_inflow_ez(nx, ny, driven_ez_);
         update_faces_from_emf(nx, ny, dt, dx, dy);
         sync_cell_centered_from_faces(w, nx, ny);
     } else {
@@ -246,6 +250,11 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
                 // Harris 电流片：由矢势线积分解析给出面心 Bx，初始 ∇·B = 0（机器精度）
                 return harris_bx_face(x, y, dy, HarrisSheetParams{});
             }
+            case 25: {
+                AsymHarrisParams ap25_bx;
+                ap25_bx.psi0 = cfg.psi0;
+                return asym_bx_face(x, y, dy, ap25_bx);
+            }
             case 15: {
                 // 45° Alfvén wave: Az = (y−x)/√2 + c·cos(2π(x+y)), c = 0.1/(2π√2)
                 // bx = [Az(x,y+½Δy) − Az(x,y−½Δy)] / Δy
@@ -271,6 +280,11 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
             case 19: case 20: case 21: case 22: case 23: {
                 // Harris 电流片：由矢势线积分解析给出面心 By，初始 ∇·B = 0（机器精度）
                 return harris_by_face(x, y, dx, HarrisSheetParams{});
+            }
+            case 25: {
+                AsymHarrisParams ap25_by;
+                ap25_by.psi0 = cfg.psi0;
+                return asym_by_face(x, y, dx, ap25_by);
             }
             case 15: {
                 // 45° Alfvén wave: Az = (y−x)/√2 + c·cos(2π(x+y)), c = 0.1/(2π√2)
