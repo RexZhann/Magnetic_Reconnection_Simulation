@@ -1591,6 +1591,32 @@ bool campaign_init(CampaignState& cs, Grid& w, DivergenceController& divb,
                   << " T1=" << P1 / cfg.dh_rho01 << " T2=" << P2 / cfg.dh_rho02
                   << " beta01=" << P1 / (0.5 * cfg.dh_B01 * cfg.dh_B01)
                   << " beta02=" << P2 / (0.5 * cfg.dh_B02 * cfg.dh_B02) << "\n";
+
+        // kick 生效自检（2026-07-13 修复：扰动幅值 0.01·B0 不乘 Bmax）。
+        // 直接采样编译进本二进制的 az_coh/az_total —— 若二进制仍是误乘
+        // Bmax 的旧码，此处 psi0_coh 与 dBrand 会按 Bmax 放大（AB2 为 3×）。
+        {
+            const auto pp = adh_params_from_config(cfg);
+            const double Lxk = cfg.x1 - cfg.x0, Lyk = cfg.y1 - cfg.y0;
+            const double qk = 0.25 * Lyk;
+            const double psi0_coh = pp.scale
+                * (pp.az_coh(0.25 * Lxk, qk) - pp.az_coh(-0.25 * Lxk, qk));
+            const double psi0_expect = pp.scale * 0.02 * Lyk
+                / (2.0 * 3.14159265358979323846);
+            double db_half = 0.0;   // max amp_br·|hash| ≈ amp_br/2（沿片行采样）
+            for (int i = 0; i < cfg.nx; ++i) {
+                const double xs = cfg.x0 + (i + 0.5) * pp.hgrid;
+                const double a = pp.az_total(xs, qk) - pp.az_eq(qk)
+                               - pp.scale * pp.az_coh(xs, qk);
+                db_half = std::max(db_half, std::fabs(a) / (pp.scale * pp.hgrid));
+            }
+            std::cout << std::scientific
+                      << "[campaign] IC kick check: psi0_coh=" << psi0_coh
+                      << " (expect " << psi0_expect << " = 0.01*B0*Ly/pi, B0=1)"
+                      << "  dBrand_amp=" << 2.0 * db_half
+                      << " (expect ~" << pp.amp_br << ")"
+                      << std::defaultfloat << "\n";
+        }
     }
     campaign_l1_tick(cs, w, cfg, divb, dx, dy, 0.0, 0.0, 0);
     cs.next_l1 = cfg.l1_dt;

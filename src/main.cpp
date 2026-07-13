@@ -56,6 +56,13 @@ int main(int argc, char* argv[]) {
         if (argc > 15) { double v = std::atof(argv[15]); if (v > 0.0) cfg.dh_rho01 = v; }
         if (argc > 16) { double v = std::atof(argv[16]); if (v > 0.0) cfg.dh_rho02 = v; }
 
+        // IC_CHECK=1：t=0 自检模式——初始化+打印 IC 检查（含 kick 幅值）后
+        // 不进主循环即收尾。用于服务器端验证"实际运行的二进制"是新码。
+        if (const char* icc = std::getenv("IC_CHECK"); icc && icc[0] == '1') {
+            cfg.t_end = 0.0;
+            std::cout << "[IC_CHECK] t=0 self-check mode: no time stepping\n";
+        }
+
         std::cout << "Test " << cfg.test << ", " << cfg.nx << "x" << cfg.ny
                   << ", " << (cfg.solver == SolverKind::FORCE ? "FORCE" : "HLLD")
                   << ", divB=" << divb_name(cfg.divb)
