@@ -1,4 +1,5 @@
 #include "my_project/solver.hpp"
+#include "my_project/perf.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -44,6 +45,16 @@ int main(int argc, char* argv[]) {
         if (argc > 7) { double v = std::atof(argv[7]); if (v >  0.0) cfg.t_end = v; }
         if (argc > 8) cfg.label = std::string(argv[8]);
         if (argc > 9) { double v = std::atof(argv[9]); if (v > 0.0) cfg.psi0 = v; }
+        // CLI 参数 10：覆盖 driven_ez（test 26 驱动强度；注意本问题符号应为负）
+        if (argc > 10) cfg.driven_ez = std::atof(argv[10]);
+        // CLI 参数 11/12：test 27 非对称度扫描的 B2 与 ρ1（B1=1、ρ2=1 固定）
+        if (argc > 11) { double v = std::atof(argv[11]); if (v > 0.0) cfg.asym_B2   = v; }
+        if (argc > 12) { double v = std::atof(argv[12]); if (v > 0.0) cfg.asym_rho1 = v; }
+        // CLI 参数 13-16：test 31 广义双片 B01/B02/ρ01/ρ02（CS2008 Table 1 九档）
+        if (argc > 13) { double v = std::atof(argv[13]); if (v > 0.0) cfg.dh_B01   = v; }
+        if (argc > 14) { double v = std::atof(argv[14]); if (v > 0.0) cfg.dh_B02   = v; }
+        if (argc > 15) { double v = std::atof(argv[15]); if (v > 0.0) cfg.dh_rho01 = v; }
+        if (argc > 16) { double v = std::atof(argv[16]); if (v > 0.0) cfg.dh_rho02 = v; }
 
         std::cout << "Test " << cfg.test << ", " << cfg.nx << "x" << cfg.ny
                   << ", " << (cfg.solver == SolverKind::FORCE ? "FORCE" : "HLLD")
@@ -66,6 +77,47 @@ int main(int argc, char* argv[]) {
             std::cout << "  Mcell-steps/s   : " << 1e-6 * static_cast<long long>(out.timing.steps) * cfg.nx * cfg.ny / std::max(out.timing.total, 1e-30) << "\n";
         }
         std::cout << "======================\n";
+
+        {
+            // 模块占比表：sweep 内三段是线程时间和，按 sweep 墙钟等比折算。
+            namespace pf = my_project::perf;
+            const double total = std::max(out.timing.total, 1e-30);
+            const double sweep_wall = out.timing.sweep_x + out.timing.sweep_y;
+            const double thr_sum = pf::t_recon + pf::t_riemann + pf::t_conupd;
+            const double f = (thr_sum > 0.0) ? sweep_wall / thr_sum : 0.0;
+            const double w_recon = pf::t_recon * f, w_riem = pf::t_riemann * f,
+                         w_conupd = pf::t_conupd * f;
+            const double known = w_recon + w_riem + w_conupd + pf::t_ct_assemble
+                + pf::t_ct_faraday + pf::t_hall + pf::t_hyper + pf::t_subcfl
+                + pf::t_bc + pf::t_dt + pf::t_floor + pf::t_diag;
+            auto row = [&](const char* name, double v) {
+                std::cout << "  " << std::left << std::setw(26) << name
+                          << std::right << std::setw(9) << v << " s  ("
+                          << std::setw(5) << 100.0 * v / total << "%)\n";
+            };
+            std::cout << "=== Perf profile (wall-clock, scaled) ===\n";
+            row("MUSCL-Hancock recon", w_recon);
+            row("Riemann (HLLD) flux", w_riem);
+            row("cons update+pri<->con", w_conupd);
+            row("CT corner-EMF assemble", pf::t_ct_assemble);
+            row("CT Faraday+sync+zero", pf::t_ct_faraday);
+            row("Hall RK4", pf::t_hall);
+            row("hyper-resistivity", pf::t_hyper);
+            row("subcycle CFL scan", pf::t_subcfl);
+            row("boundary conditions", pf::t_bc);
+            row("compute_dt", pf::t_dt);
+            row("apply_floor", pf::t_floor);
+            row("diagnostics/IO", pf::t_diag);
+            row("rest (unaccounted)", total - known);
+            if (pf::nsub_calls > 0) {
+                std::cout << "  N_sub: mean=" << double(pf::nsub_sum) / double(pf::nsub_calls)
+                          << " max=" << pf::nsub_max
+                          << " capped_steps=" << pf::nsub_capped
+                          << "/" << pf::nsub_calls << "\n";
+            }
+            std::cout << "  OMP threads: " << omp_get_max_threads() << "\n";
+            std::cout << "=========================================\n";
+        }
 
         double maxDB = 0.0;
         for (const auto& row : out.divB) for (double v : row) maxDB = std::max(maxDB, v);

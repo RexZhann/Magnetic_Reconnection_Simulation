@@ -16,6 +16,8 @@ public:
     virtual void post_step(Grid& w, int nx, int ny, double dt, double Lx, double Ly,
                            double dx, double dy) = 0;
     virtual const FaceField2D* face_field() const { return nullptr; }
+    // 非 const 访问：L3 checkpoint 续跑时把存档的面心 B 写回（仅 CT 有效）。
+    virtual FaceField2D* mutable_face_field() { return nullptr; }
     virtual void set_adiabatic_index(double /*gamma*/) {}
 
     // Set the boundary condition types so that the controller can apply the
@@ -132,6 +134,7 @@ public:
     void post_step(Grid& w, int nx, int ny, double dt, double Lx, double Ly,
                    double dx, double dy) override;
     const FaceField2D* face_field() const override { return &face_; }
+    FaceField2D* mutable_face_field() override { return &face_; }
 
     void fill_face_bn_x(int j, int n, double* buf) const override;
     void fill_face_bn_y(int i, int n, double* buf) const override;

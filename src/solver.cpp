@@ -1,13 +1,19 @@
 #include "my_project/solver.hpp"
 
+#include "my_project/perf.hpp"
 #include "my_project/harris_sheet.hpp"
 #include "my_project/asym_harris_sheet.hpp"
+#include "my_project/double_harris.hpp"
 #include "my_project/riemann.hpp"
 #include "my_project/state.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -36,6 +42,13 @@ double elapsed(Clock::time_point a, Clock::time_point b) {
     return Sec(b - a).count();
 }
 
+// campaign 质量计数器（test 31 L1 列；production run 期望全零）：
+// floor 触发次数（apply_floor，串行）与 MUSCL/半步正性回退格数
+// （slic_step，OMP 并行 → atomic）。累计值随 L1 行输出并存入 checkpoint。
+long long g_floor_rho_count = 0;
+long long g_floor_p_count   = 0;
+std::atomic<long long> g_fallback_count{0};
+
 // CT mode parameters (both optional, pass nullptr for GLM/None):
 //   face_bn : face-centered normal B at each slic interface (size n+4).
 //             face_bn[i] for i=1..n+1 is the Bx (or By in rotated y-sweep) on
@@ -57,7 +70,10 @@ void slic_step(ScratchBuf& sc, Row& wp, int n, double dt, double dx,
     Row& xL = sc.xL; Row& xR = sc.xR; Row& hL = sc.hL; Row& hR = sc.hR;
     Row& iflx = sc.iflx;
 
+    double tp0 = omp_get_wtime();
     for (int i = 0; i < N; ++i) uc[i] = pri2con(wp[i], cfg.gamma);
+    double tp_conupd = omp_get_wtime() - tp0;
+    tp0 = omp_get_wtime();
 
     for (int i = 1; i < N - 1; ++i) {
         for (int k = 0; k < NVAR; ++k) {
@@ -76,6 +92,7 @@ void slic_step(ScratchBuf& sc, Row& wp, int n, double dt, double dx,
         }
         if (xL[i][0] < 0.0 || xR[i][0] < 0.0) {
             xL[i] = uc[i]; xR[i] = uc[i];
+            g_fallback_count.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
@@ -99,8 +116,11 @@ void slic_step(ScratchBuf& sc, Row& wp, int n, double dt, double dx,
         }
         if (hL[i][0] < 0.0 || hR[i][0] < 0.0 || check_pressure(hL[i]) < 0.0 || check_pressure(hR[i]) < 0.0) {
             hL[i] = uc[i]; hR[i] = uc[i];
+            g_fallback_count.fetch_add(1, std::memory_order_relaxed);
         }
     }
+    const double tp_recon = omp_get_wtime() - tp0;
+    tp0 = omp_get_wtime();
 
     for (int i = 1; i < n + 2; ++i) {
         if (face_bn != nullptr) {
@@ -135,6 +155,9 @@ void slic_step(ScratchBuf& sc, Row& wp, int n, double dt, double dx,
         }
     }
 
+    const double tp_riemann = omp_get_wtime() - tp0;
+    tp0 = omp_get_wtime();
+
     for (int i = 2; i < n + 2; ++i) {
         for (int k = 0; k < NVAR; ++k) {
             if (!glm && k == 5) continue;  // normal B is handled by CT Faraday update
@@ -142,6 +165,14 @@ void slic_step(ScratchBuf& sc, Row& wp, int n, double dt, double dx,
         }
     }
     for (int i = 2; i < n + 2; ++i) wp[i] = con2pri(uc[i], cfg.gamma);
+    tp_conupd += omp_get_wtime() - tp0;
+
+    #pragma omp atomic
+    perf::t_recon += tp_recon;
+    #pragma omp atomic
+    perf::t_riemann += tp_riemann;
+    #pragma omp atomic
+    perf::t_conupd += tp_conupd;
 }
 
 std::string solver_suffix(SolverKind s) {
@@ -457,6 +488,174 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.n_subcycle_max    = 100;
             break;
         }
+        case 26: { // 非对称重联 driven 版：test 25 + y 边界恒定 E_z 注入磁通
+            // 与 test 25 完全一致，仅 inflow(y) 边界从纯 transmissive 改为
+            // CT 边界角点 EMF 指定恒定 E_z = -0.02（第一步试探值）。
+            // 符号：本问题重联 E_z < 0（X 点 Jz < 0，峰值时 E_z ≈ -0.05），
+            // 负号才对应两侧 E×B 入流（上边界 v_y=Ez/B1<0，下边界 v_y=Ez/(-B2)>0）。
+            const AsymHarrisParams ap;
+            cfg.x0        = -0.5 * ap.Lx; cfg.x1 = 0.5 * ap.Lx;
+            cfg.y0        = -0.5 * ap.Ly; cfg.y1 = 0.5 * ap.Ly;
+            cfg.gamma     = 5.0 / 3.0;
+            cfg.t_end     = 20.0;
+            cfg.bcx       = BC::Transmissive;  // 出流边界不变
+            cfg.bcy       = BC::Transmissive;  // ρ/p/v 零梯度；面 B 由指定 E_z 驱动
+            cfg.eta       = 0.0;
+            cfg.eta_H     = 0.001;
+            cfg.hall_di   = 1.0;
+            cfg.hall_stab = HallStabKind::HYPER_RES;
+            cfg.output_dt = 1.0;
+            cfg.rho_floor = 0.02;
+            cfg.p_floor   = 0.005;
+            cfg.subcycle_nonideal = true;
+            cfg.n_subcycle_max    = 100;
+            cfg.driven_ez = -0.02;
+            break;
+        }
+        case 27: { // CS2008 非对称度扫描：single-kick 首峰协议（B2/ρ1 由 CLI 11/12 配置）
+            // 域为 test 25 的一半（Lx=4π, Ly=2π），256×128 时 Δx 与旧域 512×256 相同。
+            // η_H 按 Δx² 规则统一缩放（锚点 4e-3 @ Δx=8π/64），五档构型同值。
+            // ψ0 由 CLI 按 0.75·B_eff 传入；B2/ρ1 在 IC 时经 asym_scan_params 生效。
+            constexpr double pi27 = 3.14159265358979323846;
+            const double Lx27 = 4.0 * pi27, Ly27 = 2.0 * pi27;
+            cfg.x0        = -0.5 * Lx27; cfg.x1 = 0.5 * Lx27;
+            cfg.y0        = -0.5 * Ly27; cfg.y1 = 0.5 * Ly27;
+            cfg.gamma     = 5.0 / 3.0;
+            cfg.t_end     = 20.0;
+            cfg.bcx       = BC::Transmissive;
+            cfg.bcy       = BC::Transmissive;
+            cfg.eta       = 0.0;
+            {
+                const double dx27   = Lx27 / nx;
+                const double dx_ref = 8.0 * pi27 / 64.0;
+                cfg.eta_H = 4.0e-3 * (dx27 / dx_ref) * (dx27 / dx_ref);
+            }
+            cfg.hall_di   = 1.0;
+            cfg.hall_stab = HallStabKind::HYPER_RES;
+            cfg.output_dt = 0.5;   // 首峰采样密度（协议要求 Δt_out ≤ 0.5）
+            cfg.rho_floor = 0.02;
+            cfg.p_floor   = 0.005;
+            cfg.subcycle_nonideal = true;
+            cfg.n_subcycle_max    = 100;
+            break;
+        }
+        case 28: { // Dirichlet + 大域 driven 侦察（R2 构型固定，Lx=8π, Ly=2π）
+            // 核心改动：y 边界 ρ/p ghost 固定为上游渐近值（质量收支闭合实验），
+            // E_z 驱动照旧（默认 E0=-0.06，CLI 10 可覆盖）。
+            // 注意本 case 固定 R2 构型（B2=2, ρ1=2），bc_* 渐近值与之绑定；
+            // 若用 CLI 11/12 改构型，需同步修改下面的 bc_* 值。
+            constexpr double pi28 = 3.14159265358979323846;
+            const double Lx28 = 8.0 * pi28, Ly28 = 2.0 * pi28;
+            cfg.x0        = -0.5 * Lx28; cfg.x1 = 0.5 * Lx28;
+            cfg.y0        = -0.5 * Ly28; cfg.y1 = 0.5 * Ly28;
+            cfg.gamma     = 5.0 / 3.0;
+            cfg.t_end     = 60.0;
+            cfg.bcx       = BC::Transmissive;
+            cfg.bcy       = BC::Transmissive;
+            cfg.eta       = 0.0;
+            {
+                const double dx28   = Lx28 / nx;
+                const double dx_ref = 8.0 * pi28 / 64.0;
+                cfg.eta_H = 4.0e-3 * (dx28 / dx_ref) * (dx28 / dx_ref);
+            }
+            cfg.hall_di   = 1.0;
+            cfg.hall_stab = HallStabKind::HYPER_RES;
+            cfg.output_dt = 1.0;
+            cfg.rho_floor = 0.02;
+            cfg.p_floor   = 0.005;
+            cfg.subcycle_nonideal = true;
+            cfg.n_subcycle_max    = 100;
+            cfg.driven_ez = -0.06;
+            // Dirichlet 标量边界：按现有 IC 渐近值（P_total = max(B²)/2+1 = 3.0）
+            //   顶 y→+∞（弱场 B1=1）：ρ=ρ1=2, p = 3 − 0.5 = 2.5
+            //   底 y→−∞（强场 B2=2）：ρ=ρ2=1, p = 3 − 2.0 = 1.0
+            cfg.dirichlet_y_scalars = true;
+            cfg.bc_rho_top = 2.0;  cfg.bc_p_top = 2.5;
+            cfg.bc_rho_bot = 1.0;  cfg.bc_p_bot = 1.0;
+            break;
+        }
+        case 29: { // CS2008 双周期双 Harris 片（对称档 pilot；Section 3 移植）
+            // 域 51.2×25.6 d_i（CS2008 的 1/4 线性尺寸），512×256 → dx=dy=0.1。
+            // 双向周期；无驱动、无欧姆电阻；η_H 按 Δx² 规则由代码计算。
+            // psi0 复用为扰动三件套的统一 scale（1=CS 幅值；冒烟传 1e-12 关断）。
+            cfg.x0        = -25.6; cfg.x1 = 25.6;
+            cfg.y0        = -12.8; cfg.y1 = 12.8;
+            cfg.gamma     = 5.0 / 3.0;
+            cfg.t_end     = 150.0;
+            cfg.bcx       = BC::Periodic;
+            cfg.bcy       = BC::Periodic;
+            cfg.eta       = 0.0;
+            {
+                const double dx29   = (cfg.x1 - cfg.x0) / nx;
+                const double dx_ref = 8.0 * 3.14159265358979323846 / 64.0;
+                cfg.eta_H = 4.0e-3 * (dx29 / dx_ref) * (dx29 / dx_ref);
+            }
+            cfg.hall_di   = 1.0;
+            cfg.hall_stab = HallStabKind::HYPER_RES;
+            cfg.output_dt = 1.0;
+            cfg.rho_floor = 0.02;
+            cfg.p_floor   = 0.005;
+            cfg.subcycle_nonideal = true;
+            cfg.n_subcycle_max    = 100;
+            cfg.psi0      = 1.0;   // 默认全幅扰动；CLI 9 可覆盖
+            break;
+        }
+        case 30: { // 电阻性非对称度扫描：test 27 镜像，耗散机制换为物理电阻
+            // 耗散无关性检验（CS2007）：同 R1–R5 构型、同域、同 kick ψ₀=0.375·B_eff，
+            // hall_di=0（无 Hall）、η_H=0（无超电阻）、η=0.005（Sweet-Parker 制度）。
+            // S_eff ~ v_out·L/η ≈ 10³，低于 plasmoid 阈值 ~10⁴。
+            // t_end=60（电阻慢）；Δt_out=0.5 保持首峰采样密度。
+            constexpr double pi30 = 3.14159265358979323846;
+            const double Lx30 = 4.0 * pi30, Ly30 = 2.0 * pi30;
+            cfg.x0        = -0.5 * Lx30; cfg.x1 = 0.5 * Lx30;
+            cfg.y0        = -0.5 * Ly30; cfg.y1 = 0.5 * Ly30;
+            cfg.gamma     = 5.0 / 3.0;
+            cfg.t_end     = 60.0;
+            cfg.bcx       = BC::Transmissive;
+            cfg.bcy       = BC::Transmissive;
+            cfg.eta       = 0.005;
+            cfg.eta_H     = 0.0;
+            cfg.hall_di   = 0.0;
+            cfg.hall_stab = HallStabKind::HYPER_RES;
+            cfg.output_dt = 0.5;
+            cfg.rho_floor = 0.02;
+            cfg.p_floor   = 0.005;
+            cfg.subcycle_nonideal = false;
+            break;
+        }
+        case 31: { // test29 campaign 档：CS2008 双片，双倍域，三层 I/O（本机版）
+            // 域由格数定，dx=dy=0.1 固定（10 cpdi）：Lx=0.1·nx, Ly=0.1·ny。
+            //   1024×512 → 102.4×51.2（Stage 0 正式档）
+            //    512×256 →  51.2×25.6（半尺寸成本校准/续跑实测）
+            // 物理与 case 29 pilot 逐项相同：双向周期、η=0、Hall d_i=1、
+            // η_H 按 Δx² 规则由实际 dx 代码计算、扰动三件套 scale=psi0。
+            // 传统快照关闭（output_dt=0），由 L1/L2/L3 三层 I/O 取代。
+            const double Lx31 = 0.1 * nx, Ly31 = 0.1 * ny;
+            cfg.x0        = -0.5 * Lx31; cfg.x1 = 0.5 * Lx31;
+            cfg.y0        = -0.5 * Ly31; cfg.y1 = 0.5 * Ly31;
+            cfg.gamma     = 5.0 / 3.0;
+            cfg.t_end     = 400.0;
+            cfg.bcx       = BC::Periodic;
+            cfg.bcy       = BC::Periodic;
+            cfg.eta       = 0.0;
+            {
+                const double dx31   = Lx31 / nx;
+                const double dx_ref = 8.0 * 3.14159265358979323846 / 64.0;
+                cfg.eta_H = 4.0e-3 * (dx31 / dx_ref) * (dx31 / dx_ref);
+            }
+            cfg.hall_di   = 1.0;
+            cfg.hall_stab = HallStabKind::HYPER_RES;
+            cfg.output_dt = 0.0;
+            cfg.rho_floor = 0.02;
+            cfg.p_floor   = 0.005;
+            cfg.subcycle_nonideal = true;
+            cfg.n_subcycle_max    = 100;
+            cfg.psi0      = 1.0;
+            cfg.campaign_io = true;
+            cfg.l1_dt     = 0.5;
+            cfg.ckpt_dt   = 10.0;
+            break;
+        }
         default:
             throw std::runtime_error("Unknown test id");
     }
@@ -469,7 +668,7 @@ std::unique_ptr<DivergenceController> make_divergence_controller(DivBCleaningKin
     return std::make_unique<NoDivBCleaning>();
 }
 
-void apply_bc(Grid& w, int nx, int ny, BC bcx, BC bcy) {
+void apply_bc(Grid& w, int nx, int ny, BC bcx, BC bcy, const RunConfig* cfg) {
     for (int j = 0; j < ny + 4; ++j) {
         if (bcx == BC::Transmissive) {
             w[0][j] = w[2][j]; w[1][j] = w[2][j];
@@ -488,6 +687,17 @@ void apply_bc(Grid& w, int nx, int ny, BC bcx, BC bcy) {
             w[i][ny + 2] = w[i][2]; w[i][ny + 3] = w[i][3];
         }
     }
+
+    // Dirichlet inflow 标量（test 28）：y ghost 的 ρ/p 覆写为固定上游值，
+    // 提供不衰减的质量/压强库；速度与 B 保持上面的零梯度填充。
+    if (cfg && cfg->dirichlet_y_scalars && bcy == BC::Transmissive) {
+        for (int i = 0; i < nx + 4; ++i) {
+            w[i][0][0] = cfg->bc_rho_bot;      w[i][1][0] = cfg->bc_rho_bot;
+            w[i][0][4] = cfg->bc_p_bot;        w[i][1][4] = cfg->bc_p_bot;
+            w[i][ny + 2][0] = cfg->bc_rho_top; w[i][ny + 3][0] = cfg->bc_rho_top;
+            w[i][ny + 2][4] = cfg->bc_p_top;   w[i][ny + 3][4] = cfg->bc_p_top;
+        }
+    }
 }
 
 void apply_floor(Grid& w, int nx, int ny, const RunConfig& cfg) {
@@ -496,8 +706,8 @@ void apply_floor(Grid& w, int nx, int ny, const RunConfig& cfg) {
     for (int i = 2; i < nx + 2; ++i)
         for (int j = 2; j < ny + 2; ++j) {
             Vec& p = w[i][j];
-            if (cfg.rho_floor > 0.0 && p[0] < cfg.rho_floor) p[0] = cfg.rho_floor;
-            if (cfg.p_floor   > 0.0 && p[4] < cfg.p_floor)   p[4] = cfg.p_floor;
+            if (cfg.rho_floor > 0.0 && p[0] < cfg.rho_floor) { p[0] = cfg.rho_floor; ++g_floor_rho_count; }
+            if (cfg.p_floor   > 0.0 && p[4] < cfg.p_floor)   { p[4] = cfg.p_floor;   ++g_floor_p_count; }
         }
 }
 
@@ -939,10 +1149,22 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
                                 0.0 };                  // ψ
                     break;
                 }
-                case 25: {
+                case 25: case 26: {
                     AsymHarrisParams ap25;
                     ap25.psi0 = cfg.psi0;
                     w[i][j] = asym_cell_ic(x, y, ap25);
+                    break;
+                }
+                case 27: case 28: case 30: {
+                    w[i][j] = asym_cell_ic(x, y, asym_scan_params(cfg));
+                    break;
+                }
+                case 29: {
+                    w[i][j] = dh_cell_ic(x, y, dh_params_from_config(cfg));
+                    break;
+                }
+                case 31: {
+                    w[i][j] = adh_cell_ic(x, y, adh_params_from_config(cfg));
                     break;
                 }
                 default:
@@ -951,6 +1173,431 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
         }
     }
 }
+
+namespace {
+// ============================================================================
+// test 31 campaign 三层 I/O（L1 schema 冻结于 output/test29_campaign/
+// l1_freeze_report.md；算法与 pilot29_diag.py 逐式一致）
+// ============================================================================
+
+struct L1Row {
+    double min_rho = 0, min_p = 0, max_divb = 0, max_v = 0, max_bz = 0;
+    // 索引 0 = 上片 (y=+Ly/4)，1 = 下片 (y=−Ly/4)
+    double psi[2] = {0, 0}, xX[2] = {0, 0}, xO[2] = {0, 0};
+    double ezB[2] = {0, 0}, wisl[2] = {0, 0}, vout[2] = {0, 0};
+    // schema v2（AB/AN/ABN 档物理信号）：片位 y（|Jz| 峰行，随动/漂移信号）
+    // 与 X 列上片两侧 ±3.0 处的带符号 vy（入流；随动修正 dyX/dt 离线做）
+    double yX[2] = {0, 0}, vinp[2] = {0, 0}, vinm[2] = {0, 0};
+};
+
+struct CampaignState {
+    std::string dir, l1_path, ckpt_path;
+    std::ofstream l1;
+    double next_l1 = 0.0, next_ckpt = 0.0, next_flush = 50.0, next_coarse = 50.0;
+    int n_l2 = 0;
+    int fired_plateau = 0, fired_island = 0, fired_burst = 0, armed_island = 0;
+    std::vector<double> pending;   // 平台窗内追加帧的计划时刻
+    std::vector<double> ea;        // EA 滚动缓冲（40 行 = Δt 20）
+    double prev_psi[2] = {0, 0};
+    double prev_t = -1.0;
+    std::vector<double> az, jz, lap;   // 工作数组（nx*ny，重复使用）
+};
+
+// 通量函数 + 片诊断（cell 中心量；与 pilot 的 numpy 实现同式）。
+L1Row campaign_l1_compute(const Grid& w, const RunConfig& cfg,
+                          double dx, double dy, CampaignState& cs) {
+    const int nx = cfg.nx, ny = cfg.ny;
+    const double Ly = cfg.y1 - cfg.y0;
+    auto W = [&](int i, int j, int k) -> double { return w[i + 2][j + 2][k]; };
+    auto id = [&](int i, int j) { return i * ny + j; };
+    cs.az.assign((size_t)nx * ny, 0.0);
+    cs.jz.assign((size_t)nx * ny, 0.0);
+    cs.lap.assign((size_t)nx * ny, 0.0);
+    // 2-leg 线积分通量函数（首列沿 y 积 Bx，再沿 x 积 By 的面均值）
+    {
+        double a = 0.0;
+        for (int j = 0; j < ny; ++j) { a += W(0, j, 5) * dy; cs.az[id(0, j)] = a; }
+        for (int i = 1; i < nx; ++i)
+            for (int j = 0; j < ny; ++j)
+                cs.az[id(i, j)] = cs.az[id(i - 1, j)]
+                    - 0.5 * (W(i - 1, j, 6) + W(i, j, 6)) * dx;
+    }
+    L1Row r;
+    for (int i = 0; i < nx; ++i) {
+        const int ip = (i + 1) % nx, im = (i + nx - 1) % nx;
+        for (int j = 0; j < ny; ++j) {
+            const int jp = (j + 1) % ny, jm = (j + ny - 1) % ny;
+            cs.jz[id(i, j)] = (W(ip, j, 6) - W(im, j, 6)) / (2.0 * dx)
+                            - (W(i, jp, 5) - W(i, jm, 5)) / (2.0 * dy);
+            r.max_bz = std::max(r.max_bz, std::fabs(W(i, j, 7)));
+        }
+    }
+    for (int i = 0; i < nx; ++i) {
+        const int ip = (i + 1) % nx, im = (i + nx - 1) % nx;
+        for (int j = 0; j < ny; ++j) {
+            const int jp = (j + 1) % ny, jm = (j + ny - 1) % ny;
+            cs.lap[id(i, j)] =
+                (cs.jz[id(ip, j)] - 2.0 * cs.jz[id(i, j)] + cs.jz[id(im, j)]) / (dx * dx)
+              + (cs.jz[id(i, jp)] - 2.0 * cs.jz[id(i, j)] + cs.jz[id(i, jm)]) / (dy * dy);
+        }
+    }
+    const double ys[2] = { +0.25 * Ly, -0.25 * Ly };
+    for (int s = 0; s < 2; ++s) {
+        // 片行 = 带内 |y−ys|≤5.0 中 x 平均 |Jz| 最大的行
+        // （v2 起带宽 2.5→5.0：非对称档片沿入流方向向强场侧漂移，需跟踪）
+        int jrow = -1; double best = -1.0;
+        for (int j = 0; j < ny; ++j) {
+            const double yc = cfg.y0 + (j + 0.5) * dy;
+            if (std::fabs(yc - ys[s]) > 5.0) continue;
+            double m = 0.0;
+            for (int i = 0; i < nx; ++i) m += std::fabs(cs.jz[id(i, j)]);
+            if (m > best) { best = m; jrow = j; }
+        }
+        r.yX[s] = cfg.y0 + (jrow + 0.5) * dy;
+        int iO = 0, iX = 0;
+        for (int i = 1; i < nx; ++i) {
+            if (cs.az[id(i, jrow)] > cs.az[id(iO, jrow)]) iO = i;
+            if (cs.az[id(i, jrow)] < cs.az[id(iX, jrow)]) iX = i;
+        }
+        r.psi[s] = cs.az[id(iO, jrow)] - cs.az[id(iX, jrow)];
+        // X = |Jz| 更大的极值点（电流片在 X 处收缩）
+        const int iXpt = (std::fabs(cs.jz[id(iX, jrow)]) >= std::fabs(cs.jz[id(iO, jrow)]))
+                         ? iX : iO;
+        const int iOpt = (iXpt == iX) ? iO : iX;
+        r.xX[s] = cfg.x0 + (iXpt + 0.5) * dx;
+        r.xO[s] = cfg.x0 + (iOpt + 0.5) * dx;
+        // Method B：X 点完整 Ez = −(v×B)z + Hall + hyper
+        {
+            const int i = iXpt, j = jrow;
+            const int ip = (i + 1) % nx, im = (i + nx - 1) % nx;
+            const int jp = (j + 1) % ny, jm = (j + ny - 1) % ny;
+            const double rho = std::max(W(i, j, 0), std::max(cfg.rho_floor, 1e-10));
+            const double vx = W(i, j, 1), vy = W(i, j, 2);
+            const double Bx = W(i, j, 5), By = W(i, j, 6);
+            const double Jx = (W(i, jp, 7) - W(i, jm, 7)) / (2.0 * dy);
+            const double Jy = -(W(ip, j, 7) - W(im, j, 7)) / (2.0 * dx);
+            r.ezB[s] = -(vx * By - vy * Bx)
+                       + (cfg.hall_di / rho) * (Jx * By - Jy * Bx)
+                       - cfg.eta_H * cs.lap[id(i, j)];
+        }
+        // v2：X 列上片两侧 ±3.0 处的带符号 vy（入流诊断原料；周期折返安全）
+        {
+            const int joff = int(3.0 / dy + 0.5);
+            r.vinp[s] = W(iXpt, (jrow + joff) % ny, 2);
+            r.vinm[s] = W(iXpt, (jrow - joff + ny) % ny, 2);
+        }
+        // 岛宽：O 列上过分离线值的等值段（v2：锚定当前片行 jrow 而非初始
+        // 片位，漂移后不失锚；无岛时退化为全高——消费端按 armed 规则处理）
+        {
+            const double sep = cs.az[id(iXpt, jrow)];
+            const int j0 = jrow;
+            const double sgn = (cs.az[id(iOpt, j0)] - sep >= 0.0) ? 1.0 : -1.0;
+            int jlo = j0, jhi = j0;
+            while (jlo > 0 && sgn * (cs.az[id(iOpt, jlo - 1)] - sep) > 0.0) --jlo;
+            while (jhi < ny - 1 && sgn * (cs.az[id(iOpt, jhi + 1)] - sep) > 0.0) ++jhi;
+            r.wisl[s] = (jhi - jlo + 1) * dy;
+        }
+        // 片带出流：|y−ys|≤1 内 max|vx|
+        for (int j = 0; j < ny; ++j) {
+            const double yc = cfg.y0 + (j + 0.5) * dy;
+            if (std::fabs(yc - ys[s]) > 1.0) continue;
+            for (int i = 0; i < nx; ++i)
+                r.vout[s] = std::max(r.vout[s], std::fabs(W(i, j, 1)));
+        }
+    }
+    return r;
+}
+
+// L2 事件快照：小端二进制，头 6 个 double {31, nx_out, ny_out, stride, t, nvar}
+// 后接 float32 数据（k 外层、j 中层、i 内层；stride 为格点抽样步长）。
+void write_l2_frame(const Grid& w, const RunConfig& cfg, double t,
+                    const std::string& tag, int stride, CampaignState& cs) {
+    if (cs.n_l2 >= 15) {
+        std::cout << "[campaign] L2 cap (15) reached, frame '" << tag
+                  << "' at t=" << t << " skipped\n";
+        return;
+    }
+    char name[96];
+    std::snprintf(name, sizeof name, "l2_t%07.1f_%s.f32", t, tag.c_str());
+    const int nxo = cfg.nx / stride, nyo = cfg.ny / stride;
+    std::ofstream f(cs.dir + "/" + name, std::ios::binary);
+    const double hdr[6] = { 31.0, double(nxo), double(nyo), double(stride),
+                            t, double(NVAR) };
+    f.write(reinterpret_cast<const char*>(hdr), sizeof hdr);
+    std::vector<float> buf(nxo);
+    for (int k = 0; k < NVAR; ++k)
+        for (int j = 0; j < nyo; ++j) {
+            for (int i = 0; i < nxo; ++i)
+                buf[i] = float(w[i * stride + 2][j * stride + 2][k]);
+            f.write(reinterpret_cast<const char*>(buf.data()),
+                    std::streamsize(buf.size() * sizeof(float)));
+        }
+    ++cs.n_l2;
+    std::cout << "[campaign] L2 frame " << cs.n_l2 << "/15: " << name << "\n";
+}
+
+// L3 滚动 checkpoint：写 .tmp 后原子替换，保留最近 1 份。
+void write_ckpt(const CampaignState& cs, const Grid& w, const FaceField2D* ff,
+                const RunConfig& cfg, double t, int step) {
+    const std::string tmp = cs.ckpt_path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary);
+        const int32_t magic = 31337, nx = cfg.nx, ny = cfg.ny;
+        auto W32 = [&](int32_t v) { f.write(reinterpret_cast<const char*>(&v), 4); };
+        auto W64 = [&](int64_t v) { f.write(reinterpret_cast<const char*>(&v), 8); };
+        auto WD  = [&](double v)  { f.write(reinterpret_cast<const char*>(&v), 8); };
+        W32(magic); W32(nx); W32(ny);
+        WD(t); W64(step);
+        W64(g_floor_rho_count); W64(g_floor_p_count);
+        W64(g_fallback_count.load());
+        WD(cs.next_l1); WD(cs.next_ckpt); WD(cs.next_flush); WD(cs.next_coarse);
+        W32(cs.n_l2); W32(cs.fired_plateau); W32(cs.fired_island);
+        W32(cs.fired_burst); W32(cs.armed_island);
+        W32(int32_t(cs.pending.size()));
+        for (double v : cs.pending) WD(v);
+        W32(int32_t(cs.ea.size()));
+        for (double v : cs.ea) WD(v);
+        WD(cs.prev_psi[0]); WD(cs.prev_psi[1]); WD(cs.prev_t);
+        for (int i = 0; i < nx; ++i)
+            for (int j = 0; j < ny; ++j)
+                f.write(reinterpret_cast<const char*>(w[i + 2][j + 2].data()),
+                        NVAR * 8);
+        for (int i = 0; i <= nx; ++i)
+            f.write(reinterpret_cast<const char*>(ff->bx[i].data()),
+                    std::streamsize(ny * 8));
+        for (int i = 0; i < nx; ++i)
+            f.write(reinterpret_cast<const char*>(ff->by[i].data()),
+                    std::streamsize((ny + 1) * 8));
+    }
+    std::remove(cs.ckpt_path.c_str());
+    if (std::rename(tmp.c_str(), cs.ckpt_path.c_str()) != 0)
+        std::cerr << "[campaign] WARNING: checkpoint rename failed\n";
+}
+
+bool load_ckpt(CampaignState& cs, Grid& w, FaceField2D* ff,
+               const RunConfig& cfg, double& t, int& step) {
+    std::ifstream f(cs.ckpt_path, std::ios::binary);
+    if (!f) return false;
+    int32_t magic = 0, nx = 0, ny = 0;
+    auto R32 = [&]() { int32_t v; f.read(reinterpret_cast<char*>(&v), 4); return v; };
+    auto R64 = [&]() { int64_t v; f.read(reinterpret_cast<char*>(&v), 8); return v; };
+    auto RD  = [&]() { double v;  f.read(reinterpret_cast<char*>(&v), 8); return v; };
+    magic = R32(); nx = R32(); ny = R32();
+    if (magic != 31337 || nx != cfg.nx || ny != cfg.ny) {
+        std::cerr << "[campaign] checkpoint mismatch (magic/nx/ny), fresh start\n";
+        return false;
+    }
+    t = RD(); step = int(R64());
+    g_floor_rho_count = R64(); g_floor_p_count = R64();
+    g_fallback_count.store(R64());
+    cs.next_l1 = RD(); cs.next_ckpt = RD(); cs.next_flush = RD(); cs.next_coarse = RD();
+    cs.n_l2 = R32(); cs.fired_plateau = R32(); cs.fired_island = R32();
+    cs.fired_burst = R32(); cs.armed_island = R32();
+    cs.pending.assign(size_t(R32()), 0.0);
+    for (double& v : cs.pending) v = RD();
+    cs.ea.assign(size_t(R32()), 0.0);
+    for (double& v : cs.ea) v = RD();
+    cs.prev_psi[0] = RD(); cs.prev_psi[1] = RD(); cs.prev_t = RD();
+    for (int i = 0; i < nx; ++i)
+        for (int j = 0; j < ny; ++j)
+            f.read(reinterpret_cast<char*>(w[i + 2][j + 2].data()), NVAR * 8);
+    for (int i = 0; i <= nx; ++i)
+        f.read(reinterpret_cast<char*>(ff->bx[i].data()), std::streamsize(ny * 8));
+    for (int i = 0; i < nx; ++i)
+        f.read(reinterpret_cast<char*>(ff->by[i].data()), std::streamsize((ny + 1) * 8));
+    return bool(f);
+}
+
+// L1 行 + L2 触发器。返回 false 表示状态非物理（调用方应终止主循环）。
+bool campaign_l1_tick(CampaignState& cs, const Grid& w, const RunConfig& cfg,
+                      DivergenceController& divb, double dx, double dy,
+                      double t, double dt, int step) {
+    const double Ly = cfg.y1 - cfg.y0;
+    Diagnostics dg = compute_diagnostics(w, cfg.nx, cfg.ny, dx, dy, divb.face_field());
+    L1Row r = campaign_l1_compute(w, cfg, dx, dy, cs);
+    const int nsub = cfg.subcycle_nonideal ? divb.last_n_sub() : 0;
+    char buf[1024];
+    std::snprintf(buf, sizeof buf,
+        "%.4f,%.6e,%d,%d,%.6e,%.6e,%.6e,%.6e,%.6e,%lld,%lld,%lld,"
+        "%.6e,%.4f,%.4f,%.6e,%.4f,%.6e,"
+        "%.6e,%.4f,%.4f,%.6e,%.4f,%.6e,"
+        "%.4f,%.6e,%.6e,%.4f,%.6e,%.6e\n",
+        t, dt, step, nsub, dg.min_rho, dg.min_p, dg.max_divB, dg.max_v,
+        r.max_bz, g_floor_rho_count, g_floor_p_count, g_fallback_count.load(),
+        r.psi[0], r.xX[0], r.xO[0], r.ezB[0], r.wisl[0], r.vout[0],
+        r.psi[1], r.xX[1], r.xO[1], r.ezB[1], r.wisl[1], r.vout[1],
+        r.yX[0], r.vinp[0], r.vinm[0], r.yX[1], r.vinp[1], r.vinm[1]);
+    cs.l1 << buf;
+    if (t >= cs.next_flush - 1e-9) { cs.l1.flush(); cs.next_flush += 50.0; }
+
+    // --- L2 触发器 ---
+    // EA 滚动缓冲（两片平均的 Method A 速率）
+    if (cs.prev_t >= 0.0 && t > cs.prev_t) {
+        const double ea = 0.5 * (std::fabs(r.psi[0] - cs.prev_psi[0])
+                               + std::fabs(r.psi[1] - cs.prev_psi[1])) / (t - cs.prev_t);
+        cs.ea.push_back(ea);
+        if (cs.ea.size() > 40) cs.ea.erase(cs.ea.begin());
+    }
+    cs.prev_psi[0] = r.psi[0]; cs.prev_psi[1] = r.psi[1]; cs.prev_t = t;
+    // 平台起点：40 行（Δt=20）全部落在中位数 ±20% 内且中位数 > 1e-3
+    if (!cs.fired_plateau && cs.ea.size() >= 40) {
+        std::vector<double> tmp(cs.ea);
+        std::nth_element(tmp.begin(), tmp.begin() + tmp.size() / 2, tmp.end());
+        const double med = tmp[tmp.size() / 2];
+        bool flat = med > 1e-3;
+        for (double e : cs.ea) if (std::fabs(e - med) >= 0.2 * med) { flat = false; break; }
+        if (flat) {
+            cs.fired_plateau = 1;
+            write_l2_frame(w, cfg, t, "plateau0", 1, cs);
+            cs.pending = { t + 5.0, t + 10.0, t + 15.0 };
+        }
+    }
+    // 平台窗内追加帧
+    for (size_t k = 0; k < cs.pending.size();) {
+        if (t >= cs.pending[k] - 1e-9) {
+            char tag[16]; std::snprintf(tag, sizeof tag, "plateau%d",
+                                        int(4 - cs.pending.size() + 1));
+            write_l2_frame(w, cfg, t, tag, 1, cs);
+            cs.pending.erase(cs.pending.begin() + long(k));
+        } else ++k;
+    }
+    // 岛宽过 Ly/2（冻结的 armed 规则：wisl 首次 < Ly/4 后才武装）
+    const double wmax = std::max(r.wisl[0], r.wisl[1]);
+    if (!cs.armed_island && wmax < 0.25 * Ly) cs.armed_island = 1;
+    if (cs.armed_island && !cs.fired_island && wmax >= 0.5 * Ly
+        && std::max(r.psi[0], r.psi[1]) > 0.15) {
+        cs.fired_island = 1;
+        write_l2_frame(w, cfg, t, "islandLy2", 1, cs);
+    }
+    // 暴发：max|v| ≥ 2 cA0
+    if (!cs.fired_burst && dg.max_v >= 2.0) {
+        cs.fired_burst = 1;
+        write_l2_frame(w, cfg, t, "burst", 1, cs);
+    }
+    // 每 t=50 粗网帧（stride 2；预留 3 帧给事件 → n_l2 < 12 才写）
+    if (t >= cs.next_coarse - 1e-9) {
+        if (cs.n_l2 < 12 && t < cfg.t_end - 1.0)
+            write_l2_frame(w, cfg, t, "coarse", 2, cs);
+        while (cs.next_coarse <= t + 1e-9) cs.next_coarse += 50.0;
+    }
+
+    return std::isfinite(dg.max_v) && std::isfinite(r.psi[0]) && std::isfinite(r.psi[1])
+        && std::isfinite(dg.max_divB) && dg.min_rho > 0.0 && dg.min_p > 0.0;
+}
+
+// 初始化（含 RESUME=1 续跑）。返回是否续跑。
+bool campaign_init(CampaignState& cs, Grid& w, DivergenceController& divb,
+                   const RunConfig& cfg, double dx, double dy,
+                   double& t, int& step) {
+    cs.dir = cfg_outdir(cfg);
+    cs.l1_path = cs.dir + "/l1.csv";
+    cs.ckpt_path = cs.dir + "/ckpt.bin";
+    cs.next_ckpt = cfg.ckpt_dt;
+    g_floor_rho_count = 0; g_floor_p_count = 0; g_fallback_count.store(0);
+
+    const char* rs = std::getenv("RESUME");
+    const bool want_resume = (rs && rs[0] == '1');
+    if (want_resume) {
+        FaceField2D* ff = divb.mutable_face_field();
+        if (ff && load_ckpt(cs, w, ff, cfg, t, step)) {
+            // 截掉 checkpoint 之后的 L1 行（避免重复区间）
+            std::vector<std::string> keep;
+            {
+                std::ifstream in(cs.l1_path);
+                std::string line;
+                while (std::getline(in, line)) {
+                    if (line.empty()) continue;
+                    if (line[0] == '#' || line[0] == 't') { keep.push_back(line); continue; }
+                    if (std::atof(line.c_str()) <= t + 1e-6) keep.push_back(line);
+                }
+            }
+            std::ofstream outf(cs.l1_path);
+            for (const auto& s : keep) outf << s << '\n';
+            cs.l1.open(cs.l1_path, std::ios::app);
+            std::cout << "[campaign] RESUMED from checkpoint: t=" << t
+                      << " step=" << step << " (L1 rows kept: "
+                      << keep.size() << ")\n";
+            return true;
+        }
+        std::cout << "[campaign] RESUME=1 but no usable checkpoint, fresh start\n";
+    }
+    // 全新启动：表头（含 t=0 压平衡 RMS 硬检查值）+ t=0 行 + L2 t0 帧
+    double pt_mean = 0.0, pt_rms = 0.0;
+    {
+        const long long n = (long long)cfg.nx * cfg.ny;
+        for (int i = 0; i < cfg.nx; ++i)
+            for (int j = 0; j < cfg.ny; ++j) {
+                const Vec& p = w[i + 2][j + 2];
+                pt_mean += p[4] + 0.5 * (p[5] * p[5] + p[6] * p[6] + p[7] * p[7]);
+            }
+        pt_mean /= double(n);
+        for (int i = 0; i < cfg.nx; ++i)
+            for (int j = 0; j < cfg.ny; ++j) {
+                const Vec& p = w[i + 2][j + 2];
+                const double d = p[4] + 0.5 * (p[5] * p[5] + p[6] * p[6] + p[7] * p[7]) - pt_mean;
+                pt_rms += d * d;
+            }
+        pt_rms = std::sqrt(pt_rms / double(n)) / pt_mean;
+    }
+    cs.l1.open(cs.l1_path);
+    cs.l1 << "# tier = " << cfg.label << " (test 31 campaign; schema v2: l1_freeze_report.md)\n"
+          << "# Lx = " << (cfg.x1 - cfg.x0) << ", Ly = " << (cfg.y1 - cfg.y0)
+          << ", nx = " << cfg.nx << ", ny = " << cfg.ny << "\n"
+          << "# eta_H = " << cfg.eta_H << ", hall_di = " << cfg.hall_di
+          << ", scale = " << cfg.psi0 << ", w0 = 2.0, beta_min = 4.0\n"
+          << "# B01 = " << cfg.dh_B01 << ", B02 = " << cfg.dh_B02
+          << ", rho01 = " << cfg.dh_rho01 << ", rho02 = " << cfg.dh_rho02 << "\n"
+          << "# ptot_rms0 = " << std::scientific << pt_rms << std::defaultfloat << "\n"
+          << "t,dt,step,nsub,min_rho,min_p,max_divb,max_v,max_bz,"
+             "floor_rho,floor_p,fallback,"
+             "up_psi,up_xX,up_xO,up_ezB,up_wisl,up_vout,"
+             "lo_psi,lo_xX,lo_xO,lo_ezB,lo_wisl,lo_vout,"
+             "up_yX,up_vinp,up_vinm,lo_yX,lo_vinp,lo_vinm\n";
+    std::cout << "[campaign] ptot_rms0 = " << pt_rms << " (hard check #1)\n";
+
+    // 广义双片 IC 静态自检（test 31）：两片上下游 B/ρ 采样应互为镜像，
+    // 逐档参数按 β_min 规则生成并打印，供与 CS2008 Table 1 对照。
+    if (cfg.test == 31) {
+        const double Ly31 = cfg.y1 - cfg.y0, q = 0.25 * Ly31;
+        const double dyc = Ly31 / cfg.ny;
+        auto samp = [&](double ysamp, int k) {
+            int j = int((ysamp - cfg.y0) / dyc - 0.5 + 0.5);
+            j = std::max(0, std::min(cfg.ny - 1, j));
+            return w[2][j + 2][k];   // x = 第一列（扰动为小量）
+        };
+        const double off = std::min(5.0, 0.4 * q);
+        struct { const char* name; double y_in, y_out; } sh[2] = {
+            { "upper", +q - off, +q + off }, { "lower", -q + off, -q - off } };
+        double v[2][4];
+        for (int s = 0; s < 2; ++s) {
+            v[s][0] = samp(sh[s].y_in, 5);  v[s][1] = samp(sh[s].y_in, 0);
+            v[s][2] = samp(sh[s].y_out, 5); v[s][3] = samp(sh[s].y_out, 0);
+            std::cout << "[campaign] IC " << sh[s].name
+                      << " sheet: inner(B02-side) B=" << v[s][0] << " rho=" << v[s][1]
+                      << " | outer(B01-side) B=" << v[s][2] << " rho=" << v[s][3] << "\n";
+        }
+        std::cout << "[campaign] IC mirror diff: inner dB=" << std::fabs(v[0][0] - v[1][0])
+                  << " drho=" << std::fabs(v[0][1] - v[1][1])
+                  << " | outer dB=" << std::fabs(v[0][2] - v[1][2])
+                  << " drho=" << std::fabs(v[0][3] - v[1][3]) << "\n";
+        const double Bmx = std::max(cfg.dh_B01, cfg.dh_B02);
+        const double Pt = 0.5 * Bmx * Bmx * (1.0 + 4.0);
+        const double P1 = Pt - 0.5 * cfg.dh_B01 * cfg.dh_B01;
+        const double P2 = Pt - 0.5 * cfg.dh_B02 * cfg.dh_B02;
+        std::cout << "[campaign] tier params (check vs CS2008 Table 1): B01=" << cfg.dh_B01
+                  << " B02=" << cfg.dh_B02 << " rho01=" << cfg.dh_rho01
+                  << " rho02=" << cfg.dh_rho02 << " | P_total=" << Pt
+                  << " P1=" << P1 << " P2=" << P2
+                  << " T1=" << P1 / cfg.dh_rho01 << " T2=" << P2 / cfg.dh_rho02
+                  << " beta01=" << P1 / (0.5 * cfg.dh_B01 * cfg.dh_B01)
+                  << " beta02=" << P2 / (0.5 * cfg.dh_B02 * cfg.dh_B02) << "\n";
+    }
+    campaign_l1_tick(cs, w, cfg, divb, dx, dy, 0.0, 0.0, 0);
+    cs.next_l1 = cfg.l1_dt;
+    write_l2_frame(w, cfg, 0.0, "t0", 1, cs);
+    return false;
+}
+} // namespace
 
 OutputData run_simulation(const RunConfig& cfg) {
     const double dx = (cfg.x1 - cfg.x0) / cfg.nx;
@@ -961,7 +1608,7 @@ OutputData run_simulation(const RunConfig& cfg) {
     Grid w(cfg.nx + 4, std::vector<Vec>(cfg.ny + 4, Vec(NVAR, 0.0)));
     initialize_problem(w, cfg);
     // Fill ghost cells before CT initializes face B from cell averages.
-    apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+    apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy, &cfg);
     auto divb = make_divergence_controller(cfg.divb);
     divb->set_adiabatic_index(cfg.gamma);
     divb->set_boundary_conditions(cfg.bcx, cfg.bcy);
@@ -971,6 +1618,7 @@ OutputData run_simulation(const RunConfig& cfg) {
     divb->set_subcycle_options(cfg.subcycle_nonideal, cfg.n_subcycle_max);
     divb->set_cfl(cfg.cfl);
     divb->set_hall_stab(cfg.hall_stab);
+    divb->set_driven_ez(cfg.driven_ez);
     divb->initialize(w, cfg, dx, dy);
 
     double t = 0.0;
@@ -984,6 +1632,16 @@ OutputData run_simulation(const RunConfig& cfg) {
     // 确保输出目录存在（label 非空时为 output/{label}，否则为 output）
     // 必须在写 snap000 之前创建，否则首帧快照会因目录不存在而静默失败
     std::filesystem::create_directories(cfg_outdir(cfg));
+
+    // test 31 campaign 三层 I/O 初始化（含 RESUME=1 续跑）
+    CampaignState cs;
+    bool campaign_resumed = false;
+    if (cfg.campaign_io) {
+        if (!divb->uses_face_centered_b())
+            throw std::runtime_error("campaign_io requires CT divergence control");
+        campaign_resumed = campaign_init(cs, w, *divb, cfg, dx, dy, t, step);
+        if (campaign_resumed) apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy, &cfg);
+    }
 
     // Snapshot output: write at t=0, then every output_dt.
     const bool do_snaps = cfg.output_dt > 0.0;
@@ -999,51 +1657,68 @@ OutputData run_simulation(const RunConfig& cfg) {
     const std::string divb_log_path = cfg_outdir(cfg) + "/test" + std::to_string(cfg.test) + "_"
         + std::to_string(cfg.nx) + "x" + std::to_string(cfg.ny)
         + solver_suffix(cfg.solver) + divb_suffix(cfg.divb) + "_divBl2.log";
-    std::ofstream divb_log(divb_log_path);
-    divb_log << "# t  l2_divB\n";
-    {
+    std::ofstream divb_log(divb_log_path,
+                           campaign_resumed ? (std::ios::out | std::ios::app)
+                                            : std::ios::out);
+    if (!campaign_resumed) {
+        divb_log << "# t  l2_divB\n";
         Diagnostics d0 = compute_diagnostics(w, cfg.nx, cfg.ny, dx, dy, divb->face_field());
         divb_log << 0.0 << ' ' << d0.l2_divB << '\n';
     }
 
     while (t < cfg.t_end) {
         auto ta = Clock::now();
-        apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+        double tw = omp_get_wtime();
+        apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy, &cfg);
+        perf::t_bc += omp_get_wtime() - tw; tw = omp_get_wtime();
         double dt = compute_dt(w, cfg.nx, cfg.ny, dx, dy, cfg, *divb);
+        perf::t_dt += omp_get_wtime() - tw;
         if (t + dt > cfg.t_end) dt = cfg.t_end - t;
         if (dt <= 0) break;
 
-        apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+        tw = omp_get_wtime();
+        apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy, &cfg);
+        perf::t_bc += omp_get_wtime() - tw;
         divb->pre_step(w, cfg.nx, cfg.ny, dt, dx, dy);
         auto tb = Clock::now();
 
         // Alternating Strang splitting: even steps XYX, odd steps YXY.
+        auto timed_bc = [&] {
+            double s = omp_get_wtime();
+            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy, &cfg);
+            perf::t_bc += omp_get_wtime() - s;
+        };
+        auto timed_floor = [&] {
+            double s = omp_get_wtime();
+            apply_floor(w, cfg.nx, cfg.ny, cfg);
+            perf::t_floor += omp_get_wtime() - s;
+        };
         Clock::time_point tc, td, te;
         if (step % 2 == 0) {
             sweep_x(w, cfg.nx, cfg.ny, 0.5 * dt, dx, cfg, *divb);
-            apply_floor(w, cfg.nx, cfg.ny, cfg);
+            timed_floor();
             tc = Clock::now();
-            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+            timed_bc();
             sweep_y(w, cfg.nx, cfg.ny, dt, dy, cfg, *divb);
-            apply_floor(w, cfg.nx, cfg.ny, cfg);
+            timed_floor();
             td = Clock::now();
-            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+            timed_bc();
             sweep_x(w, cfg.nx, cfg.ny, 0.5 * dt, dx, cfg, *divb);
-            apply_floor(w, cfg.nx, cfg.ny, cfg);
+            timed_floor();
             te = Clock::now();
             t_sweepx += elapsed(tb, tc) + elapsed(td, te);
             t_sweepy += elapsed(tc, td);
         } else {
             sweep_y(w, cfg.nx, cfg.ny, 0.5 * dt, dy, cfg, *divb);
-            apply_floor(w, cfg.nx, cfg.ny, cfg);
+            timed_floor();
             tc = Clock::now();
-            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+            timed_bc();
             sweep_x(w, cfg.nx, cfg.ny, dt, dx, cfg, *divb);
-            apply_floor(w, cfg.nx, cfg.ny, cfg);
+            timed_floor();
             td = Clock::now();
-            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+            timed_bc();
             sweep_y(w, cfg.nx, cfg.ny, 0.5 * dt, dy, cfg, *divb);
-            apply_floor(w, cfg.nx, cfg.ny, cfg);
+            timed_floor();
             te = Clock::now();
             t_sweepy += elapsed(tb, tc) + elapsed(td, te);
             t_sweepx += elapsed(tc, td);
@@ -1058,14 +1733,36 @@ OutputData run_simulation(const RunConfig& cfg) {
         ++step;
 
         if (do_snaps && t >= next_snap_t - 1e-12 * cfg.output_dt) {
-            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy, &cfg);
             auto dB_snap = compute_divB(w, cfg.nx, cfg.ny, dx, dy, divb->face_field());
             write_snapshot_file(w, dB_snap, cfg, snap_idx++, t);
             next_snap_t += cfg.output_dt;
         }
 
+        // campaign 三层 I/O：L1 行（每 l1_dt）→ L2 触发器 → L3 checkpoint
+        if (cfg.campaign_io) {
+            const double tdg = omp_get_wtime();
+            bool ok = true;
+            if (t >= cs.next_l1 - 1e-9) {
+                ok = campaign_l1_tick(cs, w, cfg, *divb, dx, dy, t, dt, step);
+                while (cs.next_l1 <= t + 1e-9) cs.next_l1 += cfg.l1_dt;
+            }
+            if (cfg.ckpt_dt > 0.0 && t >= cs.next_ckpt - 1e-9) {
+                write_ckpt(cs, w, divb->face_field(), cfg, t, step);
+                while (cs.next_ckpt <= t + 1e-9) cs.next_ckpt += cfg.ckpt_dt;
+            }
+            perf::t_diag += omp_get_wtime() - tdg;
+            if (!ok) {
+                cs.l1.flush();
+                std::cerr << "*** FATAL: campaign L1 detected unphysical state at t="
+                          << t << " (checkpoint retained for postmortem)\n";
+                break;
+            }
+        }
+
         if (step % 200 == 0) {
-            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+            const double tdg2 = omp_get_wtime();
+            apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy, &cfg);
             Diagnostics diag = compute_diagnostics(w, cfg.nx, cfg.ny, dx, dy,
                                                    divb->face_field());
             std::cout << "Step " << step
@@ -1083,6 +1780,7 @@ OutputData run_simulation(const RunConfig& cfg) {
             }
             std::cout << '\n';
             divb_log << t << ' ' << diag.l2_divB << '\n';
+            perf::t_diag += omp_get_wtime() - tdg2;
             if (diag.min_rho < 0 || diag.min_p < 0 || !std::isfinite(diag.max_divB)
                     || !std::isfinite(diag.max_v) || dt < 1e-8 * (t > 0 ? t : 1.0)) {
                 std::cerr << "*** FATAL: unphysical state at step " << step
@@ -1100,7 +1798,18 @@ OutputData run_simulation(const RunConfig& cfg) {
     timing.steps = step;
     timing.t_final = t;
 
-    apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy);
+    apply_bc(w, cfg.nx, cfg.ny, cfg.bcx, cfg.bcy, &cfg);
+
+    if (cfg.campaign_io) {
+        write_l2_frame(w, cfg, t, "final", 1, cs);
+        write_ckpt(cs, w, divb->face_field(), cfg, t, step);
+        cs.l1.flush();
+        std::cout << "[campaign] floor activations: rho=" << g_floor_rho_count
+                  << " p=" << g_floor_p_count
+                  << "  first-order fallback cells: " << g_fallback_count.load()
+                  << "  L2 frames: " << cs.n_l2 << "/15\n";
+    }
+
     OutputData out;
     out.primitive = std::move(w);
     out.divB = compute_divB(out.primitive, cfg.nx, cfg.ny, dx, dy, divb->face_field());

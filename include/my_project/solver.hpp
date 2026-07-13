@@ -21,7 +21,10 @@ struct ScratchBuf {
 RunConfig make_config_for_test(int test, int nx, int ny,
                                DivBCleaningKind divb,
                                SolverKind solver);
-void apply_bc(Grid& w, int nx, int ny, BC bcx, BC bcy);
+// cfg 非空且 cfg->dirichlet_y_scalars 时，y 方向 ghost 的 ρ/p 在零梯度填充后
+// 被覆写为固定上游值（test 28 Dirichlet inflow 标量边界）；其余行为不变。
+void apply_bc(Grid& w, int nx, int ny, BC bcx, BC bcy,
+              const RunConfig* cfg = nullptr);
 void sweep_x(Grid& w, int nx, int ny, double dt, double dx, const RunConfig& cfg,
              DivergenceController& divb);
 void sweep_y(Grid& w, int nx, int ny, double dt, double dy, const RunConfig& cfg,

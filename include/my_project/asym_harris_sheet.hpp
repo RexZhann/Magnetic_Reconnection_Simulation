@@ -24,6 +24,7 @@
 // =============================================================================
 
 #include "my_project/types.hpp"
+#include <algorithm>
 #include <cmath>
 
 namespace my_project {
@@ -74,6 +75,20 @@ struct AsymHarrisParams {
              + psi0 * std::cos(kx()*x) * std::cos(ky()*yn);
     }
 };
+
+// test 27 非对称度扫描：从 RunConfig 构造参数（B1=1、ρ2=1 固定；
+// P_total = max(B²)/2 + 1.0 保证强场侧等离子体压强下限 = 1.0；
+// 域尺寸取自 cfg 的 x/y 范围，kick 幅值取 cfg.psi0）。
+inline AsymHarrisParams asym_scan_params(const RunConfig& cfg) {
+    AsymHarrisParams ap;
+    ap.B2      = cfg.asym_B2;
+    ap.rho1    = cfg.asym_rho1;
+    ap.P_total = 0.5 * std::max(ap.B1 * ap.B1, ap.B2 * ap.B2) + 1.0;
+    ap.Lx      = cfg.x1 - cfg.x0;
+    ap.Ly      = cfg.y1 - cfg.y0;
+    ap.psi0    = cfg.psi0;
+    return ap;
+}
 
 // 单元格中心原始变量：{ρ, vx, vy, vz, p, Bx, By, Bz, ψ}
 Vec asym_cell_ic(double x, double y, const AsymHarrisParams& ap);

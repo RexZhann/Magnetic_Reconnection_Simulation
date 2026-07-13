@@ -1,6 +1,8 @@
 #include "my_project/divergence_control.hpp"
+#include "my_project/perf.hpp"
 #include "my_project/harris_sheet.hpp"
 #include "my_project/asym_harris_sheet.hpp"
+#include "my_project/double_harris.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -58,7 +60,10 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
                                     double dt, double /*Lx*/, double /*Ly*/,
                                     double dx, double dy) {
     // Step A: assemble ideal corner EMF from Riemann-solver interface fluxes.
+    double tw = omp_get_wtime();
     compute_corner_emf_from_interface_emfs(nx, ny);
+    perf::t_ct_assemble += omp_get_wtime() - tw;
+    tw = omp_get_wtime();
 
     // ------------------------------------------------------------------
     // Determine sub-cycle count for the non-ideal block.
@@ -125,12 +130,18 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
         N_sub = std::max(1, N_raw);
     }
     last_n_sub_ = N_sub;
+    perf::t_subcfl += omp_get_wtime() - tw;
+    ++perf::nsub_calls;
+    perf::nsub_sum += N_sub;
+    perf::nsub_max = std::max(perf::nsub_max, N_sub);
+    if (N_sub == n_subcycle_max_) ++perf::nsub_capped;
 
     // ------------------------------------------------------------------
     // N_sub == 1: original single-step path (bitwise identical to old code).
     // ------------------------------------------------------------------
     // 根据稳定化方案选择调用哪个函数（单步和子循环路径均使用此 lambda）
     const auto apply_stab = [&](double dt_loc) {
+        const double ts = omp_get_wtime();
         switch (hall_stab_) {
             case HallStabKind::HYPER_RES:
                 add_hyper_resistive_correction(nx, ny, dx, dy);
@@ -143,17 +154,28 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
                 break;
         }
         (void)dt_loc;
+        perf::t_hyper += omp_get_wtime() - ts;
+    };
+    const auto timed_hall = [&](double dt_loc) {
+        const double ts = omp_get_wtime();
+        add_hall_correction(w, nx, ny, dt_loc, dx, dy);
+        perf::t_hall += omp_get_wtime() - ts;
+    };
+    const auto timed_faraday = [&](double dt_loc) {
+        const double ts = omp_get_wtime();
+        update_faces_from_emf(nx, ny, dt_loc, dx, dy);
+        sync_cell_centered_from_faces(w, nx, ny);
+        perf::t_ct_faraday += omp_get_wtime() - ts;
     };
 
     if (N_sub == 1) {
         add_resistive_correction(w, nx, ny, dt, dx, dy);
         apply_stab(dt);
-        add_hall_correction(w, nx, ny, dt, dx, dy);
+        timed_hall(dt);
         // driven BC：所有贡献叠加完后，把 y 边界两排角点 EMF 覆写为指定常数，
         // 保证边界 E_z 的时间积分恰为 driven_ez_·dt
         if (driven_ez_ != 0.0) override_inflow_ez(nx, ny, driven_ez_);
-        update_faces_from_emf(nx, ny, dt, dx, dy);
-        sync_cell_centered_from_faces(w, nx, ny);
+        timed_faraday(dt);
     } else {
         // ------------------------------------------------------------------
         // N_sub > 1: operator-split sub-cycling.
@@ -169,20 +191,24 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
             current_t_, dt, dt_eta, dt_hall, dt_sub, N_sub, dt_local);
 
         // 步骤 1：理想 Faraday 推进（一次，全局 dt_hyp）
-        update_faces_from_emf(nx, ny, dt, dx, dy);
-        sync_cell_centered_from_faces(w, nx, ny);
+        // driven BC：理想步内把边界 E_z 覆写为 driven_ez_（全额注入一次），
+        // 子循环各步再把边界排清零，使全步边界 E_z 积分恰为 driven_ez_·dt
+        if (driven_ez_ != 0.0) override_inflow_ez(nx, ny, driven_ez_);
+        timed_faraday(dt);
 
         // 步骤 2：非理想子循环（每步使用当前面心 B）
         for (int sub = 0; sub < N_sub; ++sub) {
             // 清零角点 EMF：每子步仅累积非理想贡献
+            tw = omp_get_wtime();
             for (int I = 0; I <= nx; ++I)
                 std::fill(face_.emf_z[I].begin(), face_.emf_z[I].end(), 0.0);
+            perf::t_ct_faraday += omp_get_wtime() - tw;
 
             add_resistive_correction(w, nx, ny, dt_local, dx, dy);
             apply_stab(dt_local);
-            add_hall_correction(w, nx, ny, dt_local, dx, dy);
-            update_faces_from_emf(nx, ny, dt_local, dx, dy);
-            sync_cell_centered_from_faces(w, nx, ny);
+            timed_hall(dt_local);
+            if (driven_ez_ != 0.0) override_inflow_ez(nx, ny, 0.0);
+            timed_faraday(dt_local);
         }
     }
 
@@ -250,11 +276,14 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
                 // Harris 电流片：由矢势线积分解析给出面心 Bx，初始 ∇·B = 0（机器精度）
                 return harris_bx_face(x, y, dy, HarrisSheetParams{});
             }
-            case 25: {
+            case 25: case 26: {
                 AsymHarrisParams ap25_bx;
                 ap25_bx.psi0 = cfg.psi0;
                 return asym_bx_face(x, y, dy, ap25_bx);
             }
+            case 27: case 28: case 30: return asym_bx_face(x, y, dy, asym_scan_params(cfg));
+            case 29: return dh_bx_face(x, y, dy, dh_params_from_config(cfg));
+            case 31: return adh_bx_face(x, y, dy, adh_params_from_config(cfg));
             case 15: {
                 // 45° Alfvén wave: Az = (y−x)/√2 + c·cos(2π(x+y)), c = 0.1/(2π√2)
                 // bx = [Az(x,y+½Δy) − Az(x,y−½Δy)] / Δy
@@ -281,11 +310,14 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
                 // Harris 电流片：由矢势线积分解析给出面心 By，初始 ∇·B = 0（机器精度）
                 return harris_by_face(x, y, dx, HarrisSheetParams{});
             }
-            case 25: {
+            case 25: case 26: {
                 AsymHarrisParams ap25_by;
                 ap25_by.psi0 = cfg.psi0;
                 return asym_by_face(x, y, dx, ap25_by);
             }
+            case 27: case 28: case 30: return asym_by_face(x, y, dx, asym_scan_params(cfg));
+            case 29: return dh_by_face(x, y, dx, dh_params_from_config(cfg));
+            case 31: return adh_by_face(x, y, dx, adh_params_from_config(cfg));
             case 15: {
                 // 45° Alfvén wave: Az = (y−x)/√2 + c·cos(2π(x+y)), c = 0.1/(2π√2)
                 // by = −[Az(x+½Δx,y) − Az(x−½Δx,y)] / Δx
@@ -568,6 +600,23 @@ void CTDivergenceControl::compute_corner_emf_from_interface_emfs(int nx, int ny)
     }
 }
 
+// driven reconnection BC：y 边界（J=0 下、J=ny 上）整排角点 EMF 覆写为 value。
+//
+// 原理：Faraday ∂Bx/∂t = −∂Ez/∂y，边界指定恒定 Ez 相当于以 E×B 漂移速率
+// v_in = Ez/Bx 持续把上游磁通对流进域内（上边界 Bx=+B1 → v_y=Ez/B1，
+// 下边界 Bx=−B2 → v_y=−Ez/B2；Ez<0 时两侧均为入流，磁通供给率相等 = |Ez|）。
+//
+// div-B 安全性：CT 的离散 ∇·B=0 由"面 B 增量 = 角点 EMF 的离散旋度"这一
+// 代数结构保证，与角点 EMF 的具体数值无关，覆写边界值不破坏机器精度。
+// 沿边界排 Ez 为常数 → ΔBy(边界 face) = (dt/dx)(Ez[i+1]−Ez[i]) = 0，
+// 即只向边界 Bx face 注入通量，不产生切向 By 污染。
+void CTDivergenceControl::override_inflow_ez(int nx, int ny, double value) {
+    for (int I = 0; I <= nx; ++I) {
+        face_.emf_z[I][0]  = value;
+        face_.emf_z[I][ny] = value;
+    }
+}
+
 // Advance face B via discrete Faraday:
 //   ΔBx[I][J] = -(dt/dy)*(Ez[I][J+1] - Ez[I][J])
 //   ΔBy[I][J] =  (dt/dx)*(Ez[I+1][J] - Ez[I][J])
@@ -655,11 +704,18 @@ static void hall_stage(
     ScalarField& emfz_out,      // (nx+1)×(ny+1) — E_z^Hall
     ScalarField& Bz_rate_out    // nx×ny         — dBz/dt
 ) {
-    // Corner currents (I=0..nx, J=0..ny)
-    ScalarField Jx_c(nx+1, std::vector<double>(ny+1, 0.0));
-    ScalarField Jy_c(nx+1, std::vector<double>(ny+1, 0.0));
-    ScalarField Jz_c(nx+1, std::vector<double>(ny+1, 0.0));
+    // 性能优化：scratch 静态复用（每子步 ×4 stage 调用曾各分配 5 个数组）。
+    // ponytail: 仅从串行上下文调用（post_step），static 无竞争；后续全量覆写，无需清零。
+    static ScalarField Jx_c, Jy_c, Jz_c, ExH, EyH;
+    auto ensure = [](ScalarField& f, int n1, int n2) {
+        if ((int)f.size() != n1 || (int)f[0].size() != n2)
+            f.assign(n1, std::vector<double>(n2, 0.0));
+    };
+    ensure(Jx_c, nx+1, ny+1); ensure(Jy_c, nx+1, ny+1); ensure(Jz_c, nx+1, ny+1);
+    ensure(ExH, nx, ny+1);    ensure(EyH, nx+1, ny);
+    ensure(emfz_out, nx+1, ny+1); ensure(Bz_rate_out, nx, ny);
 
+    // 角点电流 + E_z^Hall 同一趟计算（原两个同形状循环合并，表达式与顺序不变）
     #pragma omp parallel for collapse(2) schedule(static)
     for (int I = 0; I <= nx; ++I) {
         for (int J = 0; J <= ny; ++J) {
@@ -693,14 +749,8 @@ static void hall_stage(
             double Bz_left  = 0.5*(Bz_in[iL][jD] + Bz_in[iL][jU]);
             Jx_c[I][J] =  (Bz_up   - Bz_down ) / dy;
             Jy_c[I][J] = -(Bz_right - Bz_left) / dx;
-        }
-    }
 
-    // E_z^Hall at corners
-    emfz_out.assign(nx+1, std::vector<double>(ny+1, 0.0));
-    #pragma omp parallel for collapse(2) schedule(static)
-    for (int I = 0; I <= nx; ++I) {
-        for (int J = 0; J <= ny; ++J) {
+            // E_z^Hall at this corner (原独立循环合并至此，表达式不变)
             double rho_c = 0.25*(w[I+1][J+1][0] + w[I+2][J+1][0] +
                                  w[I+1][J+2][0] + w[I+2][J+2][0]);
             rho_c = std::max(rho_c, rho_floor);
@@ -719,9 +769,6 @@ static void hall_stage(
     }
 
     // ExH at y-faces (i,J) and EyH at x-faces (I,j) → dBz/dt
-    ScalarField ExH(nx,     std::vector<double>(ny+1, 0.0));
-    ScalarField EyH(nx+1,   std::vector<double>(ny,   0.0));
-
     #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < nx; ++i) {
         for (int J = 0; J <= ny; ++J) {
@@ -752,7 +799,6 @@ static void hall_stage(
         }
     }
 
-    Bz_rate_out.assign(nx, std::vector<double>(ny, 0.0));
     #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < nx; ++i)
         for (int j = 0; j < ny; ++j)
@@ -769,40 +815,43 @@ static void faraday_advance(
     int nx, int ny, double dx, double dy, double fac,
     ScalarField& bx_out, ScalarField& by_out
 ) {
-    bx_out = bx_in;
-    by_out = by_in;
-    #pragma omp parallel for collapse(2) schedule(static)
-    for (int I = 0; I <= nx; ++I)
-        for (int j = 0; j < ny; ++j)
-            bx_out[I][j] -= fac * (emfz[I][j+1] - emfz[I][j]) / dy;
-    #pragma omp parallel for collapse(2) schedule(static)
-    for (int i = 0; i < nx; ++i)
-        for (int J = 0; J <= ny; ++J)
-            by_out[i][J] += fac * (emfz[i+1][J] - emfz[i][J]) / dx;
+    // 性能优化：直写输出（原先整数组拷贝后再原地更新）。
+    // a -= b 改为 out = in - b，同一表达式同一舍入；输出数组全量覆写。
+    if ((int)bx_out.size() != nx+1 || (int)bx_out[0].size() != ny)
+        bx_out.assign(nx+1, std::vector<double>(ny, 0.0));
+    if ((int)by_out.size() != nx || (int)by_out[0].size() != ny+1)
+        by_out.assign(nx, std::vector<double>(ny+1, 0.0));
+    #pragma omp parallel
+    {
+        #pragma omp for collapse(2) schedule(static) nowait
+        for (int I = 0; I <= nx; ++I)
+            for (int j = 0; j < ny; ++j)
+                bx_out[I][j] = bx_in[I][j] - fac * (emfz[I][j+1] - emfz[I][j]) / dy;
+        #pragma omp for collapse(2) schedule(static)
+        for (int i = 0; i < nx; ++i)
+            for (int J = 0; J <= ny; ++J)
+                by_out[i][J] = by_in[i][J] + fac * (emfz[i+1][J] - emfz[i][J]) / dx;
+    }
 }
 
 void CTDivergenceControl::add_hall_correction(Grid& w, int nx, int ny,
                                               double dt, double dx, double dy) {
     if (hall_di_ <= 0.0) return;
 
+    // 性能优化：RK4 stage 数组静态复用（原每次调用 13 次堆分配；子循环下
+    // 每全局步调用 N_sub 次）。仅串行上下文调用；各数组均被全量覆写。
+    static ScalarField Bz0, emfz1, emfz2, emfz3, emfz4,
+                       kBz1, kBz2, kBz3, kBz4, bx_tmp, by_tmp, Bz_tmp;
+    if ((int)Bz0.size() != nx || (int)Bz0[0].size() != ny) {
+        Bz0.assign(nx, std::vector<double>(ny, 0.0));
+        Bz_tmp.assign(nx, std::vector<double>(ny, 0.0));
+    }
+
     // Extract initial cell-centred Bz into a 0-indexed array
-    ScalarField Bz0(nx, std::vector<double>(ny, 0.0));
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < nx; ++i)
         for (int j = 0; j < ny; ++j)
             Bz0[i][j] = w[i+2][j+2][7];
-
-    // Allocate RK4 stage arrays
-    ScalarField emfz1(nx+1, std::vector<double>(ny+1, 0.0));
-    ScalarField emfz2(nx+1, std::vector<double>(ny+1, 0.0));
-    ScalarField emfz3(nx+1, std::vector<double>(ny+1, 0.0));
-    ScalarField emfz4(nx+1, std::vector<double>(ny+1, 0.0));
-    ScalarField kBz1(nx, std::vector<double>(ny, 0.0));
-    ScalarField kBz2(nx, std::vector<double>(ny, 0.0));
-    ScalarField kBz3(nx, std::vector<double>(ny, 0.0));
-    ScalarField kBz4(nx, std::vector<double>(ny, 0.0));
-    ScalarField bx_tmp(nx+1, std::vector<double>(ny,   0.0));
-    ScalarField by_tmp(nx,   std::vector<double>(ny+1, 0.0));
-    ScalarField Bz_tmp(nx,   std::vector<double>(ny,   0.0));
 
     // Stage 1: rates at (bx_0, by_0, Bz_0)
     hall_stage(face_.bx, face_.by, Bz0, w, nx, ny, dx, dy,
@@ -810,6 +859,7 @@ void CTDivergenceControl::add_hall_correction(Grid& w, int nx, int ny,
 
     // Stage 2: half-step advance from stage 1
     faraday_advance(face_.bx, face_.by, emfz1, nx, ny, dx, dy, dt*0.5, bx_tmp, by_tmp);
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < nx; ++i)
         for (int j = 0; j < ny; ++j)
             Bz_tmp[i][j] = Bz0[i][j] + (dt*0.5) * kBz1[i][j];
@@ -818,6 +868,7 @@ void CTDivergenceControl::add_hall_correction(Grid& w, int nx, int ny,
 
     // Stage 3: half-step advance from stage 2
     faraday_advance(face_.bx, face_.by, emfz2, nx, ny, dx, dy, dt*0.5, bx_tmp, by_tmp);
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < nx; ++i)
         for (int j = 0; j < ny; ++j)
             Bz_tmp[i][j] = Bz0[i][j] + (dt*0.5) * kBz2[i][j];
@@ -826,6 +877,7 @@ void CTDivergenceControl::add_hall_correction(Grid& w, int nx, int ny,
 
     // Stage 4: full-step advance from stage 3
     faraday_advance(face_.bx, face_.by, emfz3, nx, ny, dx, dy, dt, bx_tmp, by_tmp);
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < nx; ++i)
         for (int j = 0; j < ny; ++j)
             Bz_tmp[i][j] = Bz0[i][j] + dt * kBz3[i][j];

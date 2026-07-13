@@ -1,12 +1,26 @@
 #pragma once
 
+#include <algorithm>
+#include <array>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
 namespace my_project {
 
 inline constexpr int NVAR = 9;
-using Vec  = std::vector<double>;
+
+// 定长状态向量（原 std::vector<double>）。性能优化：栈上定长，消除
+// hlld_flux/pri2con 等热路径每次调用的堆分配；元素语义与运算顺序不变。
+// 构造函数签名兼容旧 vector 用法：Vec(n)、Vec(n, v)、Vec{...}。
+struct Vec : std::array<double, NVAR> {
+    Vec() : std::array<double, NVAR>{} {}          // 零初始化（与旧 vector 一致）
+    explicit Vec(int) : Vec() {}
+    Vec(int, double v) { fill(v); }
+    Vec(std::initializer_list<double> il) : Vec() {
+        std::copy(il.begin(), il.end(), begin());
+    }
+};
 using Row  = std::vector<Vec>;
 using Grid = std::vector<std::vector<Vec>>;
 using ScalarField = std::vector<std::vector<double>>;
@@ -97,12 +111,38 @@ struct RunConfig {
     // test 25 非对称重联扰动幅值 ψ₀（CLI 第 9 参数可覆盖；默认 0.2）
     double psi0 = 0.2;
 
+    // test 27 非对称度扫描（CS2008 对标）：B2 与 ρ1 可配，B1=1、ρ2=1 固定。
+    // P_total 在 IC 构造时按 max(B²)/2 + 1.0 规则自动计算。
+    // CLI 第 11/12 参数可覆盖；默认值 = R2 构型（与 test 25 相同的场/密度比）。
+    double asym_B2   = 2.0;
+    double asym_rho1 = 2.0;
+
+    // test 28 Dirichlet inflow 标量边界：y 方向 ghost 的 ρ/p 固定为上游初始
+    // 渐近值（速度零梯度不变、B 仍走 CT 角点 EMF 指定 E_z 方案）。
+    // 目的：闭合 driven 长时程的质量收支（零梯度边界无固定质量库 → 空化崩溃）。
+    bool   dirichlet_y_scalars = false;
+    double bc_rho_top = 0.0, bc_p_top = 0.0;   // y=y1 侧（弱场 B1、密度 ρ1）
+    double bc_rho_bot = 0.0, bc_p_bot = 0.0;   // y=y0 侧（强场 B2、密度 ρ2）
+
     // driven reconnection（test 26）：y 方向 inflow 边界指定恒定 out-of-plane
     // 电场 E_z（代码符号约定，0 = 关闭）。CT 更新中把 J=0 和 J=ny 两排角点
     // EMF 直接设为该值，通过 Faraday 定律持续注入上游磁通（E×B 入流）。
     // 只对 CT + bcy=Transmissive 生效。注意符号：本问题重联 E_z < 0
     // （X 点 Jz < 0），所以驱动值也必须为负才是入流方向。
     double driven_ez = 0.0;
+
+    // test 31 campaign 三层 I/O（L1 schema 已在 Step 0 冻结，见
+    // output/test29_campaign/l1_freeze_report.md）：
+    //   L1 每 l1_dt 追加一行诊断 CSV（每 t=50 flush）；
+    //   L2 事件触发 float32 快照（上限 15 帧）；
+    //   L3 滚动 checkpoint（每 ckpt_dt，保留最近 1 份；RESUME=1 续跑）。
+    bool   campaign_io = false;
+    double l1_dt   = 0.5;
+    double ckpt_dt = 10.0;   // 本机版加密到 t=10
+
+    // test 31 广义双片（CS2008 Eq. 3-4）：01 = 外侧，02 = 内侧。
+    // CLI 13/14/15/16 覆盖；默认全 1 = Sym 档。
+    double dh_B01 = 1.0, dh_B02 = 1.0, dh_rho01 = 1.0, dh_rho02 = 1.0;
 };
 
 struct Diagnostics {
