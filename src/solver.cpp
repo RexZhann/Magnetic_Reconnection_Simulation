@@ -1312,6 +1312,18 @@ L1Row campaign_l1_compute(const Grid& w, const RunConfig& cfg,
 // 后接 float32 数据（k 外层、j 中层、i 内层；stride 为格点抽样步长）。
 void write_l2_frame(const Grid& w, const RunConfig& cfg, double t,
                     const std::string& tag, int stride, CampaignState& cs) {
+    // L2_STRIDE 环境变量：所有 L2 帧的抽样步长统一乘以该系数（默认 1 =
+    // 行为不变）。纯 I/O 体积开关，供大箱（2048×1024）在 1.2GB quota 下
+    // 使用（L2_STRIDE=4 → 单帧 75.5MB→4.7MB）。帧头 stride 字段如实记录，
+    // 读取端无需改动。
+    static const int l2_mult = [] {
+        const char* s = std::getenv("L2_STRIDE");
+        const int v = s ? std::atoi(s) : 1;
+        if (v > 1) std::cout << "[campaign] L2_STRIDE=" << v
+                             << " (all L2 frames coarsened)\n";
+        return std::max(1, v);
+    }();
+    stride *= l2_mult;
     if (cs.n_l2 >= 15) {
         std::cout << "[campaign] L2 cap (15) reached, frame '" << tag
                   << "' at t=" << t << " skipped\n";
