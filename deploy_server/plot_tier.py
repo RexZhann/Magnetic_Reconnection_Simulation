@@ -38,8 +38,9 @@ LABEL = {"up": "upper sheet", "lo": "lower sheet"}
 # the two sheets couple and the single-X-line diagnostic frame breaks down.
 # Time-series *_tcut figures and ALL statistics are restricted to t <= T_CUT;
 # the island-width figure and the 2D snapshots keep the full run.
-T_CUT = 170.0
-TCUT_XLIM = (0.0, 180.0)
+# argv[2] overrides (default 170 = AB1 behaviour unchanged); e.g. AB1big -> 290
+T_CUT = float(sys.argv[2]) if len(sys.argv) > 2 else 170.0
+TCUT_XLIM = (0.0, T_CUT + 10.0)
 
 # ---------- L1 ----------
 meta, cols, rows = {}, None, []
@@ -227,11 +228,19 @@ def flux_function(Bx, By, dx, dy):   # (nx, ny) arrays
 
 
 allframes = sorted(glob.glob(os.path.join(DIR, "l2_*.f32")))
-# prefer the physics-tagged frames; pad with evenly spaced others up to 4
-pref = [p for p in allframes if any(k in p for k in
-        ("plateau0", "islandLy2", "burst", "final"))]
-rest = [p for p in allframes if p not in pref]
-picks = (pref + rest[:: max(1, len(rest) // max(1, 4 - len(pref)))])[:4]
+# PLOT_FRAMES="0,209,300,400": pick frames nearest these times (lets AB1big
+# skip its false-fired islandLy2@t=8 frame).  Unset -> original preference.
+pf = os.environ.get("PLOT_FRAMES")
+if pf:
+    tof = lambda p: float(re.search(r"l2_t(\d+\.\d)", p).group(1))
+    picks = [min(allframes, key=lambda p: abs(tof(p) - float(s)))
+             for s in pf.split(",")]
+else:
+    # prefer the physics-tagged frames; pad with evenly spaced others up to 4
+    pref = [p for p in allframes if any(k in p for k in
+            ("plateau0", "islandLy2", "burst", "final"))]
+    rest = [p for p in allframes if p not in pref]
+    picks = (pref + rest[:: max(1, len(rest) // max(1, 4 - len(pref)))])[:4]
 picks = sorted(set(picks))
 frames = [read_l2(p) for p in picks]
 
