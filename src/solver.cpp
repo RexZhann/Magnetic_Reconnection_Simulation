@@ -1473,11 +1473,17 @@ bool campaign_l1_tick(CampaignState& cs, const Grid& w, const RunConfig& cfg,
             cs.pending.erase(cs.pending.begin() + long(k));
         } else ++k;
     }
-    // 岛宽过 Ly/2（冻结的 armed 规则：wisl 首次 < Ly/4 后才武装）
+    // 岛宽过 Ly/2（armed 规则 + 2026-07-18 修复×2，经用户批准）：
+    //  1) 退化排除：wisl==Ly 是等值段扫描失败的带内哨兵（非测量值），
+    //     曾致 AB2 t=4.5 / AB1big t=8 误燃烧帧位；有效帧须 < Ly-0.5dy。
+    //  2) ψ 门槛随域高缩放（0.15 标定于 Ly=51.2；固定值在大箱被
+    //     kick 初始通量 ψ0=0.01Ly/π 直接越过而失效）。Ly=51.2 档行为不变。
+    const bool cross0 = r.wisl[0] >= 0.5 * Ly && r.wisl[0] < Ly - 0.5 * dy;
+    const bool cross1 = r.wisl[1] >= 0.5 * Ly && r.wisl[1] < Ly - 0.5 * dy;
     const double wmax = std::max(r.wisl[0], r.wisl[1]);
     if (!cs.armed_island && wmax < 0.25 * Ly) cs.armed_island = 1;
-    if (cs.armed_island && !cs.fired_island && wmax >= 0.5 * Ly
-        && std::max(r.psi[0], r.psi[1]) > 0.15) {
+    if (cs.armed_island && !cs.fired_island && (cross0 || cross1)
+        && std::max(r.psi[0], r.psi[1]) > 0.15 * (Ly / 51.2)) {
         cs.fired_island = 1;
         write_l2_frame(w, cfg, t, "islandLy2", 1, cs);
     }

@@ -67,18 +67,18 @@ def smooth(v, n=5):
 EA = {s: np.abs(np.diff(C[f"{s}_psi"])) / np.diff(T) for s in ("up", "lo")}
 EAc = smooth(0.5 * (EA["up"] + EA["lo"]))
 
-# island crossing (armed rule + SUSTAINED >=5 time units) ------------------
-# 2026-07-14: the window cap previously used the instantaneous test; AB1's
-# early X/O-swap frames fired a false crossing at t=3.0 and emptied the
-# window search.  Now identical to the fig-2 star and analyze_tier.py.
+# island crossing (armed + sustained + degenerate-masked) -------------------
+# 2026-07-18 ruling: wisl == Ly frames are failed measurements (masked);
+# identical rule in analyze_tier.py.  Neutral for Sym/AB1; fixes AB2/AB1big.
 def island_times(wI):
+    valid = wI < LY - 1e-6
     seen, ok = False, np.zeros(len(wI), bool)
     for k, v in enumerate(wI):
-        if v < 0.25 * LY: seen = True
-        ok[k] = seen and v >= 0.5 * LY
+        if valid[k] and v < 0.25 * LY: seen = True
+        ok[k] = seen and valid[k] and v >= 0.5 * LY
     for k in np.where(ok)[0]:
-        hold = (T >= T[k]) & (T <= T[k] + 5.0)
-        if np.all(ok[hold]):
+        hold = (T >= T[k]) & (T <= T[k] + 5.0) & valid
+        if hold.sum() >= 3 and np.all(wI[hold] >= 0.5 * LY):
             return float(T[k])
     return None
 
@@ -180,23 +180,10 @@ plt.close(fig)
 
 # ---------- fig 2: island width (FULL run; sustained-crossing marker) ----------
 def sustained_crossing(wI, hold=5.0):
-    """First armed t with w >= Ly/2 kept for > `hold` time units.
-    Armed rule (frozen): detection only active after w < Ly/4 has been seen
-    once -- the no-island Az-level scan degenerates to the full box height,
-    so early rows would otherwise false-trigger (spike-proof via `hold`)."""
-    above = wI >= 0.5 * LY
-    armed = False
-    for k in range(len(T)):
-        if wI[k] < 0.25 * LY:
-            armed = True
-        if not (armed and above[k]):
-            continue
-        j = k
-        while j + 1 < len(T) and above[j + 1]:
-            j += 1
-        if T[j] - T[k] > hold:
-            return float(T[k])
-    return None
+    """First armed t with VALID w >= Ly/2 sustained for `hold` time units.
+    2026-07-18 ruling: degenerate frames (w == Ly, failed Az-level scan) are
+    masked as non-measurements -- identical to island_times above."""
+    return island_times(wI)
 
 t_sus = {s: sustained_crossing(C[f"{s}_wisl"]) for s in ("up", "lo")}
 fig, ax = plt.subplots(figsize=(9.5, 4.8))

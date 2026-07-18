@@ -53,31 +53,37 @@ tm = 0.5 * (T[:-1] + T[1:])
 EA = {s: np.abs(np.diff(C[f"{s}_psi"])) / np.diff(T) for s in ("up", "lo")}
 EAc = smooth(0.5 * (EA["up"] + EA["lo"]))
 
-# --- island crossing / saturation (armed rule + SUSTAINED rule) ---
-# 2026-07-14: added the pre-registered sustained criterion (pitfall #2 in the
-# handover ruling: crossing must HOLD >= 5 time units).  AB1 has early X/O-swap
-# frames where wisl flips between the degenerate full-box value (Ly) and the
-# true small width; the instantaneous test fired a false crossing at t=3.0
-# (visual truth ~176).  Sym is unaffected (re-run verified identical verdict).
+# --- island crossing / saturation (armed + sustained + DEGENERATE-MASKED) ---
+# 2026-07-14: pre-registered sustained criterion added (pitfall #2: crossing
+# must HOLD >= 5 time units) -- kills isolated X/O-swap flips (AB1 false t=3.0).
+# 2026-07-18 (user-approved ruling): degenerate frames wisl == Ly are FAILED
+# MEASUREMENTS (the contour scan's in-band sentinel), masked out entirely.
+# Long degenerate stretches otherwise satisfy "sustained >= Ly/2" and fired
+# false crossings (AB2: t=79 in the t=76-105 stretch, true 184/185; AB1big:
+# t=110 in the t=110-148 stretch, true 295.5/331.5).  Neutrality verified:
+# Sym (300.0/303.5) and AB1 (176.0/176.0) are bit-identical under masking.
 def island_times(wI):
+    degen = wI >= LY - 1e-6           # failed-measurement sentinel frames
+    valid = ~degen
     armed = np.zeros(len(wI), bool)
     seen = False
     for k, v in enumerate(wI):
-        if v < 0.25 * LY:
+        if valid[k] and v < 0.25 * LY:
             seen = True
         armed[k] = seen
-    ok = armed & (wI >= 0.5 * LY)
+    ok = armed & valid & (wI >= 0.5 * LY)
     kc = None
     for k in np.where(ok)[0]:
-        hold = (T >= T[k]) & (T <= T[k] + 5.0)
-        if np.all(ok[hold]):          # sustained: holds for 5 time units
-            kc = int(k)
+        hold = (T >= T[k]) & (T <= T[k] + 5.0) & valid
+        if hold.sum() >= 3 and np.all(wI[hold] >= 0.5 * LY):
+            kc = int(k)               # sustained over VALID frames only
             break
     if kc is None:
         return None, None
     t_cross = float(T[kc])
-    wmax = wI[kc:].max()
-    sat = (wI >= 0.98 * wmax) & (np.arange(len(wI)) >= kc)
+    tail_valid = valid & (np.arange(len(wI)) >= kc)
+    wmax = wI[tail_valid].max() if tail_valid.any() else wI[kc]
+    sat = tail_valid & (wI >= 0.98 * wmax)
     t_sat = float(T[np.argmax(sat)]) if sat.any() else None
     return t_cross, t_sat
 
