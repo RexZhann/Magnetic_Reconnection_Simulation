@@ -40,24 +40,23 @@ int main(int argc, char* argv[]) {
 
         RunConfig cfg = make_config_for_test(test, nx, ny, divb, solver);
 
-        // CLI 参数 6–8：覆盖 η_H、t_end 和输出标签（均可选）
+        // Optional CLI overrides: 6-9 eta_H, t_end, label, psi0
         if (argc > 6) { double v = std::atof(argv[6]); if (v >= 0.0) cfg.eta_H = v; }
         if (argc > 7) { double v = std::atof(argv[7]); if (v >  0.0) cfg.t_end = v; }
         if (argc > 8) cfg.label = std::string(argv[8]);
         if (argc > 9) { double v = std::atof(argv[9]); if (v > 0.0) cfg.psi0 = v; }
-        // CLI 参数 10：覆盖 driven_ez（test 26 驱动强度；注意本问题符号应为负）
+        // 10: driven_ez (test 26; must be negative for inflow drive)
         if (argc > 10) cfg.driven_ez = std::atof(argv[10]);
-        // CLI 参数 11/12：test 27 非对称度扫描的 B2 与 ρ1（B1=1、ρ2=1 固定）
+        // 11/12: test 27 asymmetry scan B2, rho1 (B1 = rho2 = 1 fixed)
         if (argc > 11) { double v = std::atof(argv[11]); if (v > 0.0) cfg.asym_B2   = v; }
         if (argc > 12) { double v = std::atof(argv[12]); if (v > 0.0) cfg.asym_rho1 = v; }
-        // CLI 参数 13-16：test 31 广义双片 B01/B02/ρ01/ρ02（CS2008 Table 1 九档）
+        // 13-16: test 31 double-sheet B01/B02/rho01/rho02 (CS2008 Table 1)
         if (argc > 13) { double v = std::atof(argv[13]); if (v > 0.0) cfg.dh_B01   = v; }
         if (argc > 14) { double v = std::atof(argv[14]); if (v > 0.0) cfg.dh_B02   = v; }
         if (argc > 15) { double v = std::atof(argv[15]); if (v > 0.0) cfg.dh_rho01 = v; }
         if (argc > 16) { double v = std::atof(argv[16]); if (v > 0.0) cfg.dh_rho02 = v; }
 
-        // IC_CHECK=1：t=0 自检模式——初始化+打印 IC 检查（含 kick 幅值）后
-        // 不进主循环即收尾。用于服务器端验证"实际运行的二进制"是新码。
+        // IC_CHECK=1: initialize and print IC checks only, skip the main loop.
         if (const char* icc = std::getenv("IC_CHECK"); icc && icc[0] == '1') {
             cfg.t_end = 0.0;
             std::cout << "[IC_CHECK] t=0 self-check mode: no time stepping\n";
@@ -86,7 +85,7 @@ int main(int argc, char* argv[]) {
         std::cout << "======================\n";
 
         {
-            // 模块占比表：sweep 内三段是线程时间和，按 sweep 墙钟等比折算。
+            // Per-module table: thread-summed sweep sections rescaled to sweep wall-clock.
             namespace pf = my_project::perf;
             const double total = std::max(out.timing.total, 1e-30);
             const double sweep_wall = out.timing.sweep_x + out.timing.sweep_y;

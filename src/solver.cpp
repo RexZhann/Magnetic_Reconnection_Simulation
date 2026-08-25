@@ -30,8 +30,7 @@ namespace my_project {
 namespace {
 using Clock = std::chrono::steady_clock;
 
-// 返回该配置的输出目录（末尾无斜杠）。
-// label 非空时为 output/{label}，否则为 output。
+// Output dir (no trailing slash): output/{label} or output.
 std::string cfg_outdir(const RunConfig& cfg) {
     return cfg.label.empty() ? "output" : "output/" + cfg.label;
 }
@@ -42,9 +41,8 @@ double elapsed(Clock::time_point a, Clock::time_point b) {
     return Sec(b - a).count();
 }
 
-// campaign 质量计数器（test 31 L1 列；production run 期望全零）：
-// floor 触发次数（apply_floor，串行）与 MUSCL/半步正性回退格数
-// （slic_step，OMP 并行 → atomic）。累计值随 L1 行输出并存入 checkpoint。
+// Campaign quality counters (test 31 L1 columns; expected all-zero in
+// production): floor hits (serial) and MUSCL positivity fallbacks (atomic).
 long long g_floor_rho_count = 0;
 long long g_floor_p_count   = 0;
 std::atomic<long long> g_fallback_count{0};
@@ -259,70 +257,56 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.y0 = 0.0;  cfg.y1 = static_cast<double>(ny) / nx;
             cfg.gamma = 5.0 / 3.0; cfg.t_end = 0.05;
             cfg.bcx = BC::Transmissive; cfg.bcy = BC::Transmissive; break;
-        case 11: { // Harris current sheet — resistive MHD reconnection
-            // Parameters and references: see include/my_project/harris_sheet.hpp
-            //   Equilibrium:   Harris (1962), Il Nuovo Cimento 23, 115
-            //   Domain/perturb: Birn et al. (2001), J. Geophys. Res. 106, 3715
-            //   MHD convention: Loureiro et al. (2007), Phys. Plasmas 14, 100703
-            const HarrisSheetParams hp;
-            cfg.x0       = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;  // x ∈ [-2π, 2π]
-            cfg.y0       = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;  // y ∈ [-π,  π]
-            cfg.gamma    = 5.0 / 3.0;
-            cfg.t_end    = 20.0;       // ≈ 1.6 Alfvén crossing times (Lx / vA∞)
-            cfg.bcx      = BC::Periodic;      // reconnected flux wraps around in x
-            cfg.bcy      = BC::Transmissive;  // outflow open boundary in y
-            cfg.eta      = hp.eta;            // S = Lx/η ≈ 2500 (Sweet-Parker 1958)
-            cfg.output_dt = 1.0;              // write snapshots at t=0,1,...
-            break;
-        }
-        case 12: { // Harris current sheet — Hall MHD reconnection (GEM challenge)
-            // Same equilibrium and domain as test 11; adds Hall term d_i/ρ J×B.
-            // GEM parameters: Birn et al. (2001), J. Geophys. Res. 106, 3715
-            //   d_i = 1.0 (ion inertial length ≈ 2λ; speeds reconnection ~10×)
+        case 11: { // Harris sheet — resistive MHD reconnection.
+            // References: harris_sheet.hpp (Harris 1962; Birn 2001; Loureiro 2007).
             const HarrisSheetParams hp;
             cfg.x0       = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
             cfg.y0       = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
             cfg.gamma    = 5.0 / 3.0;
-            cfg.t_end    = 12.0;       // Hall reconnection is much faster; 12 is enough
+            cfg.t_end    = 20.0;
             cfg.bcx      = BC::Periodic;
             cfg.bcy      = BC::Transmissive;
-            cfg.eta      = hp.eta;            // same resistivity as resistive MHD run
-            cfg.hall_di  = 1.0;               // GEM challenge: d_i = 1.0 (= 2λ)
+            cfg.eta      = hp.eta;            // S = Lx/η ≈ 2500
             cfg.output_dt = 1.0;
-            cfg.rho_floor = 0.02;  // prevent density cavitation (10% of background 0.2)
-            cfg.p_floor   = 0.005; // pressure floor
             break;
         }
-        case 13: { // Circularly polarised Alfvén wave — Tóth (2000) §5.1 convergence test
-            // 1D periodic domain [0,1]; va = B0/sqrt(rho0) = 1, so t_end=1 is one
-            // Alfvén crossing time and the solution returns to its exact initial state.
+        case 12: { // test 11 + Hall term (GEM challenge, d_i = 1)
+            const HarrisSheetParams hp;
+            cfg.x0       = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
+            cfg.y0       = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
+            cfg.gamma    = 5.0 / 3.0;
+            cfg.t_end    = 12.0;
+            cfg.bcx      = BC::Periodic;
+            cfg.bcy      = BC::Transmissive;
+            cfg.eta      = hp.eta;
+            cfg.hall_di  = 1.0;
+            cfg.output_dt = 1.0;
+            cfg.rho_floor = 0.02;  // prevent density cavitation
+            cfg.p_floor   = 0.005;
+            break;
+        }
+        case 13: { // Circularly polarised Alfvén wave — Tóth 2000 §5.1.
+            // t_end = 1 Alfvén period: solution returns to the initial state.
             cfg.x0 = 0.0; cfg.x1 = 1.0;
             cfg.y0 = 0.0; cfg.y1 = static_cast<double>(ny) / nx;
             cfg.gamma = 5.0 / 3.0; cfg.t_end = 1.0;
             cfg.bcx = BC::Periodic; cfg.bcy = BC::Transmissive; break;
         }
-        case 14: { // Same wave propagating in y — convergence test for y-sweeps
-            // Mirror of test 13: guide field By=B0, perturbations in Bx/Bz,
-            // periodic in y, nx=2 (thin strip in x).
+        case 14: { // Mirror of test 13 propagating in y (y-sweep convergence)
             cfg.x0 = 0.0; cfg.x1 = static_cast<double>(nx) / ny;
             cfg.y0 = 0.0; cfg.y1 = 1.0;
             cfg.gamma = 5.0 / 3.0; cfg.t_end = 1.0;
             cfg.bcx = BC::Transmissive; cfg.bcy = BC::Periodic; break;
         }
-        case 15: { // 2D circularly polarised Alfvén wave at 45° — Tóth (2000) §5.2
-            // Wave vector k = 2π(x̂+ŷ), guide field B0(x̂+ŷ)/√2.
-            // Periodic in both directions; domain [0,1]×[0,1]; nx=ny=N.
-            // t_end = 1/√2: one Alfvén period → solution returns to initial state.
+        case 15: { // 45° Alfvén wave — Tóth 2000 §5.2. t_end = one period.
             cfg.x0 = 0.0; cfg.x1 = 1.0;
             cfg.y0 = 0.0; cfg.y1 = 1.0;
             cfg.gamma = 5.0 / 3.0;
             cfg.t_end = 1.0 / std::sqrt(2.0);
             cfg.bcx = BC::Periodic; cfg.bcy = BC::Periodic; break;
         }
-        case 16: { // Hyper-resistivity k⁴ scaling — mode n=1 (k=2π)
-            // By=A0·sin(2πx), no background field.  All three modes (16/17/18) share
-            // identical η_H and t_end so γ ratios directly reflect the k⁴ operator.
-            // Analytic: γ = η_H·k⁴.  Run: ./build/mhd2d 16 64 64 2 1
+        case 16: { // Hyper-resistivity k⁴ scaling, mode n=1. Analytic γ = η_H·k⁴;
+            // tests 16/17/18 share η_H and t_end so γ ratios isolate the k⁴ operator.
             cfg.x0 = 0.0; cfg.x1 = 1.0;
             cfg.y0 = 0.0; cfg.y1 = 1.0;
             cfg.gamma = 5.0 / 3.0;
@@ -331,7 +315,7 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.eta_H = 1e-4;
             break;
         }
-        case 17: { // Hyper-resistivity k⁴ scaling — mode n=2 (k=4π)
+        case 17: { // k⁴ scaling, mode n=2
             cfg.x0 = 0.0; cfg.x1 = 1.0;
             cfg.y0 = 0.0; cfg.y1 = 1.0;
             cfg.gamma = 5.0 / 3.0;
@@ -340,7 +324,7 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.eta_H = 1e-4;
             break;
         }
-        case 18: { // Hyper-resistivity k⁴ scaling — mode n=4 (k=8π)
+        case 18: { // k⁴ scaling, mode n=4
             cfg.x0 = 0.0; cfg.x1 = 1.0;
             cfg.y0 = 0.0; cfg.y1 = 1.0;
             cfg.gamma = 5.0 / 3.0;
@@ -349,12 +333,7 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.eta_H = 1e-4;
             break;
         }
-        case 19: { // Harris sheet — hyper-resistive MHD reconnection
-            // Same equilibrium and domain as test 11 (resistive MHD), but
-            // replaces uniform resistivity η with 4th-order hyper-resistivity η_H.
-            // η_H = 0.001 gives effective dissipation at grid scale comparable to
-            // η = 0.005 at the current-sheet scale λ = 0.5.
-            // dt ~ h^4/(32 η_H) ≈ 2.9e-3 for 128×64 → ~7k steps for t_end=20.
+        case 19: { // test 11 with hyper-resistivity η_H instead of uniform η
             const HarrisSheetParams hp;
             cfg.x0        = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
             cfg.y0        = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
@@ -370,9 +349,7 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.p_floor   = 0.01;
             break;
         }
-        case 20: { // Harris 电流片——Hall MHD + 超电阻（GEM + hyper）
-            // Hall 项（d_i=1，GEM challenge）+ 超电阻（η_H=0.001）
-            // dt 由 Hall RK4 CFL 主导（约 2.6e-4 for 128×64）
+        case 20: { // Harris sheet — Hall MHD (GEM, d_i=1) + hyper-resistivity
             const HarrisSheetParams hp;
             cfg.x0        = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
             cfg.y0        = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
@@ -389,8 +366,7 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.p_floor   = 0.005;
             break;
         }
-        case 21: { // test 20 + 非理想子循环（subcycle_nonideal=true）
-            // 霍尔 CFL 从全局 dt 移除；每全局步做 N_sub 子步处理哨声波稳定性
+        case 21: { // test 20 + non-ideal sub-cycling (Hall CFL off the global dt)
             const HarrisSheetParams hp;
             cfg.x0        = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
             cfg.y0        = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
@@ -409,8 +385,7 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.n_subcycle_max    = 100;
             break;
         }
-        case 22: { // test 21 但 eta_H=0（纯 Hall MHD，无超电阻）
-            // 缺乏短波耗散，仿真在 t≈5 因 X 点奇点而崩溃
+        case 22: { // test 21 with eta_H=0 (pure Hall; crashes ~t=5 at the X-point)
             const HarrisSheetParams hp;
             cfg.x0        = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
             cfg.y0        = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
@@ -429,11 +404,8 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.n_subcycle_max    = 100;
             break;
         }
-        case 23: { // Harris 电流片——Hall MHD + Hall-HLL 扩散稳定化（Path B）
-            // *** Hall-HLL 开发已停止（实验性），保留供参考；主线使用 test 21 (HYPER_RES) ***
-            // 用 HLL 型哨声波速耗散替代超电阻，无子循环。
-            // dt 由 HLL CFL 主导：约 9e-5 for 128×64（约 2.85× 更严格于 RK4 CFL）
-            // 参考：Iwasaki & Tomida 2025（Hall-HLL 弥散近似）
+        case 23: { // Harris sheet — Hall MHD + Hall-HLL stabilization (Path B).
+            // Experimental, development stopped; mainline is test 21 (HYPER_RES).
             const HarrisSheetParams hp;
             cfg.x0        = -0.5 * hp.Lx; cfg.x1 = 0.5 * hp.Lx;
             cfg.y0        = -0.5 * hp.Ly; cfg.y1 = 0.5 * hp.Ly;
@@ -450,16 +422,12 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.p_floor   = 0.005;
             break;
         }
-        case 24: { // 1D 哨声波色散测试（验证 Hall-HLL 过阻尼特性）
-            // *** Hall-HLL 开发已停止（实验性），保留供参考；主线使用 test 21 (HYPER_RES) ***
-            // 背景：ρ=1，p=0.1，Bx=B₀=1（沿传播方向），δBy=A·cos(kx)，δBz=A·sin(kx)
-            // 解析频率：ω = di·k² = 0.1·(2π)² ≈ 3.95
-            // Hall-HLL 理论阻尼率：γ = (π/2)·ω ≈ 6.2（过阻尼，γ > ω）
-            // 用途：验证 γ/ω = π/2 与 Iwasaki & Tomida 2025 预测一致
+        case 24: { // 1D whistler dispersion test — checks Hall-HLL overdamping
+            // (γ/ω = π/2, Iwasaki & Tomida 2025). Experimental, kept for reference.
             cfg.x0     = 0.0; cfg.x1 = 1.0;
             cfg.y0     = 0.0; cfg.y1 = static_cast<double>(ny) / nx;
             cfg.gamma  = 5.0 / 3.0;
-            cfg.t_end  = 1.0;   // 约 0.63 个哨声波周期；HLL 阻尼在 t≈0.5 完成
+            cfg.t_end  = 1.0;
             cfg.bcx    = BC::Periodic;
             cfg.bcy    = BC::Periodic;
             cfg.eta    = 0.0;
@@ -469,13 +437,13 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.output_dt = 0.02;
             break;
         }
-        case 25: { // 非对称磁场重联（B1=1, B2=2, ρ1=2, ρ2=1；X点偏向弱场侧 y>0）
+        case 25: { // Asymmetric reconnection (B1=1, B2=2, rho1=2, rho2=1)
             const AsymHarrisParams ap;
             cfg.x0        = -0.5 * ap.Lx; cfg.x1 = 0.5 * ap.Lx;
             cfg.y0        = -0.5 * ap.Ly; cfg.y1 = 0.5 * ap.Ly;
             cfg.gamma     = 5.0 / 3.0;
             cfg.t_end     = 20.0;
-            cfg.bcx       = BC::Transmissive;  // x 方向改为出流，防止重联出流周期性绕回
+            cfg.bcx       = BC::Transmissive;  // outflow in x (no periodic wrap-around)
             cfg.bcy       = BC::Transmissive;
             cfg.eta       = 0.0;
             cfg.eta_H     = 0.001;
@@ -488,18 +456,15 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.n_subcycle_max    = 100;
             break;
         }
-        case 26: { // 非对称重联 driven 版：test 25 + y 边界恒定 E_z 注入磁通
-            // 与 test 25 完全一致，仅 inflow(y) 边界从纯 transmissive 改为
-            // CT 边界角点 EMF 指定恒定 E_z = -0.02（第一步试探值）。
-            // 符号：本问题重联 E_z < 0（X 点 Jz < 0，峰值时 E_z ≈ -0.05），
-            // 负号才对应两侧 E×B 入流（上边界 v_y=Ez/B1<0，下边界 v_y=Ez/(-B2)>0）。
+        case 26: { // test 25 + constant Ez flux injection at y boundaries.
+            // Ez must be negative here: that gives E×B inflow on both sides.
             const AsymHarrisParams ap;
             cfg.x0        = -0.5 * ap.Lx; cfg.x1 = 0.5 * ap.Lx;
             cfg.y0        = -0.5 * ap.Ly; cfg.y1 = 0.5 * ap.Ly;
             cfg.gamma     = 5.0 / 3.0;
             cfg.t_end     = 20.0;
-            cfg.bcx       = BC::Transmissive;  // 出流边界不变
-            cfg.bcy       = BC::Transmissive;  // ρ/p/v 零梯度；面 B 由指定 E_z 驱动
+            cfg.bcx       = BC::Transmissive;
+            cfg.bcy       = BC::Transmissive;  // scalars zero-gradient; face B driven by Ez
             cfg.eta       = 0.0;
             cfg.eta_H     = 0.001;
             cfg.hall_di   = 1.0;
@@ -512,10 +477,8 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.driven_ez = -0.02;
             break;
         }
-        case 27: { // CS2008 非对称度扫描：single-kick 首峰协议（B2/ρ1 由 CLI 11/12 配置）
-            // 域为 test 25 的一半（Lx=4π, Ly=2π），256×128 时 Δx 与旧域 512×256 相同。
-            // η_H 按 Δx² 规则统一缩放（锚点 4e-3 @ Δx=8π/64），五档构型同值。
-            // ψ0 由 CLI 按 0.75·B_eff 传入；B2/ρ1 在 IC 时经 asym_scan_params 生效。
+        case 27: { // CS2008 asymmetry scan, single-kick first-peak protocol.
+            // B2/rho1 via CLI 11/12; eta_H scaled by dx² (anchor 4e-3 @ dx=8π/64).
             constexpr double pi27 = 3.14159265358979323846;
             const double Lx27 = 4.0 * pi27, Ly27 = 2.0 * pi27;
             cfg.x0        = -0.5 * Lx27; cfg.x1 = 0.5 * Lx27;
@@ -532,18 +495,16 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             }
             cfg.hall_di   = 1.0;
             cfg.hall_stab = HallStabKind::HYPER_RES;
-            cfg.output_dt = 0.5;   // 首峰采样密度（协议要求 Δt_out ≤ 0.5）
+            cfg.output_dt = 0.5;   // first-peak sampling (protocol: Δt_out ≤ 0.5)
             cfg.rho_floor = 0.02;
             cfg.p_floor   = 0.005;
             cfg.subcycle_nonideal = true;
             cfg.n_subcycle_max    = 100;
             break;
         }
-        case 28: { // Dirichlet + 大域 driven 侦察（R2 构型固定，Lx=8π, Ly=2π）
-            // 核心改动：y 边界 ρ/p ghost 固定为上游渐近值（质量收支闭合实验），
-            // E_z 驱动照旧（默认 E0=-0.06，CLI 10 可覆盖）。
-            // 注意本 case 固定 R2 构型（B2=2, ρ1=2），bc_* 渐近值与之绑定；
-            // 若用 CLI 11/12 改构型，需同步修改下面的 bc_* 值。
+        case 28: { // Driven large-domain scout with Dirichlet y-boundary scalars.
+            // Fixed R2 configuration (B2=2, rho1=2): the bc_* values below are
+            // tied to it — update them if CLI 11/12 changes the configuration.
             constexpr double pi28 = 3.14159265358979323846;
             const double Lx28 = 8.0 * pi28, Ly28 = 2.0 * pi28;
             cfg.x0        = -0.5 * Lx28; cfg.x1 = 0.5 * Lx28;
@@ -566,18 +527,16 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.subcycle_nonideal = true;
             cfg.n_subcycle_max    = 100;
             cfg.driven_ez = -0.06;
-            // Dirichlet 标量边界：按现有 IC 渐近值（P_total = max(B²)/2+1 = 3.0）
-            //   顶 y→+∞（弱场 B1=1）：ρ=ρ1=2, p = 3 − 0.5 = 2.5
-            //   底 y→−∞（强场 B2=2）：ρ=ρ2=1, p = 3 − 2.0 = 1.0
+            // Dirichlet scalars from IC asymptotes (P_total = 3.0):
+            // top (B1=1): rho=2, p=2.5; bottom (B2=2): rho=1, p=1.0
             cfg.dirichlet_y_scalars = true;
             cfg.bc_rho_top = 2.0;  cfg.bc_p_top = 2.5;
             cfg.bc_rho_bot = 1.0;  cfg.bc_p_bot = 1.0;
             break;
         }
-        case 29: { // CS2008 双周期双 Harris 片（对称档 pilot；Section 3 移植）
-            // 域 51.2×25.6 d_i（CS2008 的 1/4 线性尺寸），512×256 → dx=dy=0.1。
-            // 双向周期；无驱动、无欧姆电阻；η_H 按 Δx² 规则由代码计算。
-            // psi0 复用为扰动三件套的统一 scale（1=CS 幅值；冒烟传 1e-12 关断）。
+        case 29: { // CS2008 doubly-periodic double Harris sheet (symmetric pilot).
+            // Domain 51.2×25.6 d_i; psi0 reused as the perturbation scale
+            // (1 = CS amplitude, 1e-12 disables).
             cfg.x0        = -25.6; cfg.x1 = 25.6;
             cfg.y0        = -12.8; cfg.y1 = 12.8;
             cfg.gamma     = 5.0 / 3.0;
@@ -597,14 +556,12 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.p_floor   = 0.005;
             cfg.subcycle_nonideal = true;
             cfg.n_subcycle_max    = 100;
-            cfg.psi0      = 1.0;   // 默认全幅扰动；CLI 9 可覆盖
+            cfg.psi0      = 1.0;   // full-amplitude default; CLI 9 overrides
             break;
         }
-        case 30: { // 电阻性非对称度扫描：test 27 镜像，耗散机制换为物理电阻
-            // 耗散无关性检验（CS2007）：同 R1–R5 构型、同域、同 kick ψ₀=0.375·B_eff，
-            // hall_di=0（无 Hall）、η_H=0（无超电阻）、η=0.005（Sweet-Parker 制度）。
-            // S_eff ~ v_out·L/η ≈ 10³，低于 plasmoid 阈值 ~10⁴。
-            // t_end=60（电阻慢）；Δt_out=0.5 保持首峰采样密度。
+        case 30: { // Resistive asymmetry scan: test 27 with physical resistivity
+            // (eta=0.005, Sweet-Parker regime, no Hall/hyper) — dissipation-
+            // independence check per CS2007.
             constexpr double pi30 = 3.14159265358979323846;
             const double Lx30 = 4.0 * pi30, Ly30 = 2.0 * pi30;
             cfg.x0        = -0.5 * Lx30; cfg.x1 = 0.5 * Lx30;
@@ -623,13 +580,9 @@ RunConfig make_config_for_test(int test, int nx, int ny,
             cfg.subcycle_nonideal = false;
             break;
         }
-        case 31: { // test29 campaign 档：CS2008 双片，双倍域，三层 I/O（本机版）
-            // 域由格数定，dx=dy=0.1 固定（10 cpdi）：Lx=0.1·nx, Ly=0.1·ny。
-            //   1024×512 → 102.4×51.2（Stage 0 正式档）
-            //    512×256 →  51.2×25.6（半尺寸成本校准/续跑实测）
-            // 物理与 case 29 pilot 逐项相同：双向周期、η=0、Hall d_i=1、
-            // η_H 按 Δx² 规则由实际 dx 代码计算、扰动三件套 scale=psi0。
-            // 传统快照关闭（output_dt=0），由 L1/L2/L3 三层 I/O 取代。
+        case 31: { // test29 campaign tier: CS2008 double sheet, three-layer I/O.
+            // Domain set by grid size with dx=dy=0.1 fixed; physics identical
+            // to case 29. Snapshots off (output_dt=0), replaced by L1/L2/L3.
             const double Lx31 = 0.1 * nx, Ly31 = 0.1 * ny;
             cfg.x0        = -0.5 * Lx31; cfg.x1 = 0.5 * Lx31;
             cfg.y0        = -0.5 * Ly31; cfg.y1 = 0.5 * Ly31;
@@ -688,8 +641,8 @@ void apply_bc(Grid& w, int nx, int ny, BC bcx, BC bcy, const RunConfig* cfg) {
         }
     }
 
-    // Dirichlet inflow 标量（test 28）：y ghost 的 ρ/p 覆写为固定上游值，
-    // 提供不衰减的质量/压强库；速度与 B 保持上面的零梯度填充。
+    // Dirichlet inflow scalars (test 28): fix ghost rho/p to upstream values;
+    // v and B keep the zero-gradient fill above.
     if (cfg && cfg->dirichlet_y_scalars && bcy == BC::Transmissive) {
         for (int i = 0; i < nx + 4; ++i) {
             w[i][0][0] = cfg->bc_rho_bot;      w[i][1][0] = cfg->bc_rho_bot;
@@ -800,11 +753,11 @@ double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
             smax = std::max(smax, s);
             ch_loc = std::max(ch_loc, std::max(sx, sy));
             double B2 = p[5]*p[5] + p[6]*p[6] + p[7]*p[7];
-            // 霍尔 CFL 两种方案分别需要 |B|/√ρ 和 |B|/ρ
+            // Hall CFL needs |B|/√ρ (RK4) and |B|/ρ (HLL)
             double rho_va = cfg.hall_di > 0.0 ? std::max(p[0], cfg.rho_floor) : std::max(p[0], 1e-14);
-            max_va2     = std::max(max_va2,    B2 / rho_va);                        // 用于 RK4 CFL
-            max_b2_rho2 = std::max(max_b2_rho2, B2 / (rho_va*rho_va));            // 用于 HLL CFL
-            if (cfg.hall_di > 0.0 && cfg.hall_stab == HallStabKind::HALL_HLL)     // 用于 c_stab CFL（仅 HALL_HLL）
+            max_va2     = std::max(max_va2,    B2 / rho_va);
+            max_b2_rho2 = std::max(max_b2_rho2, B2 / (rho_va*rho_va));
+            if (cfg.hall_di > 0.0 && cfg.hall_stab == HallStabKind::HALL_HLL)
                 max_cf2_hll = std::max(max_cf2_hll, (cfg.gamma * p[4] + B2) / rho_va);
         }
     }
@@ -814,15 +767,13 @@ double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
         constexpr double pi = 3.14159265358979323846;
         double mincell = std::min(dx, dy);
         if (cfg.hall_stab == HallStabKind::HALL_HLL) {
-            // c_stab = c_f + c_w 稳定性条件：c_stab·dt/h ≤ 1
-            // c_f_max = sqrt(max(γp+B²)/ρ)：快磁声速，在磁零点退化为声速（物理底）
-            // c_w_max = π·di·max(|B|/ρ)：哨声波速（不加人工常数 floor）
+            // c_stab = c_f + c_w, stability c_stab·dt/h ≤ 1
             double c_f_max  = std::sqrt(max_cf2_hll);
             double c_w_max  = cfg.hall_di * pi * std::sqrt(max_b2_rho2);
             double smax_hll = (c_f_max + c_w_max) / mincell;
             smax = std::max(smax, smax_hll);
         } else {
-            // RK4 稳定性（|ω·dt| < 2√2 ≈ 2.83），使用 vA = |B|/√ρ
+            // RK4 stability |ω·dt| < 2√2 ≈ 2.83, with vA = |B|/√ρ
             double smax_hall = cfg.hall_di * (pi*pi/2.83) * std::sqrt(max_va2)
                                / (mincell * mincell);
             smax = std::max(smax, smax_hall);
@@ -831,7 +782,7 @@ double compute_dt(const Grid& w, int nx, int ny, double dx, double dy,
     double dt = cfg.cfl / smax;
     if (cfg.eta_H > 0.0) {
         double mincell = std::min(dx, dy);
-        // 显式 Euler 双调和稳定性：dt ≤ h⁴ / (32·η_H)
+        // Explicit biharmonic stability: dt ≤ h⁴/(32·η_H)
         double dt_hyper = std::pow(mincell, 4) / (32.0 * cfg.eta_H);
         dt = std::min(dt, dt_hyper);
     }
@@ -1011,18 +962,13 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
                     break;
                 }
                 case 11: {
-                    // Harris current-sheet — resistive MHD
-                    // Uniform density (Loureiro et al. 2007 convention): ρ = ρ_bg = 1.
+                    // Harris sheet — resistive MHD (uniform density, Loureiro 2007)
                     w[i][j] = harris_cell_ic(x, y, HarrisSheetParams{});
                     break;
                 }
                 case 12: {
-                    // Harris current-sheet — Hall MHD (GEM challenge)
-                    // Use kinetic Harris density n(y) = n_bg + sech²(y/λ) so that
-                    // ρ_min = n_bg = 0.2 prevents (d_i/ρ)J×B from diverging at X-line.
-                    // Reference: Birn et al. (2001), J. Geophys. Res. 106, 3715.
-                    // Pressure p_eq(y) = 0.5·(0.2 + sech²(y/λ)) is already consistent
-                    // with this density at uniform temperature T = 0.5 — no change needed.
+                    // Harris sheet — Hall MHD (GEM). Kinetic density
+                    // n = n_bg + sech²(y/λ) keeps (d_i/ρ)J×B bounded at the X-line.
                     const HarrisSheetParams hp;
                     Vec ic = harris_cell_ic(x, y, hp);
                     const double s = 1.0 / std::cosh(y / hp.lam);
@@ -1126,27 +1072,26 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
                 case 21:
                 case 22:
                 case 23: {
-                    // Hall + hyper-res (test 20/21)、纯 Hall (test 22) 或 Hall-HLL (test 23)
-                    // 均使用 GEM 动理论密度 IC（与 test 12 相同）
+                    // GEM kinetic-density IC (same as test 12)
                     const HarrisSheetParams hp;
                     Vec ic = harris_cell_ic(x, y, hp);
                     const double s = 1.0 / std::cosh(y / hp.lam);
-                    ic[0] = 0.2 + s * s;   // GEM：n_bg=0.2，n0=1.0
+                    ic[0] = 0.2 + s * s;   // GEM: n_bg=0.2, n0=1.0
                     w[i][j] = ic;
                     break;
                 }
                 case 24: {
-                    // 1D 哨声波测试：背景场 Bx=1（沿 x），横向扰动 δBy/δBz
+                    // 1D whistler: background Bx=1, circularly polarised δBy/δBz
                     constexpr double pi = 3.14159265358979323846;
                     const double k  = 2.0 * pi / (cfg.x1 - cfg.x0);
                     const double A  = 0.01;
-                    w[i][j] = { 1.0,                    // ρ
-                                0.0, 0.0, 0.0,          // vx, vy, vz
-                                0.1,                    // p
-                                1.0,                    // Bx（背景场，哨声波沿此方向传播）
-                                A * std::cos(k * x),    // δBy
-                                A * std::sin(k * x),    // δBz（圆偏振）
-                                0.0 };                  // ψ
+                    w[i][j] = { 1.0,
+                                0.0, 0.0, 0.0,
+                                0.1,
+                                1.0,
+                                A * std::cos(k * x),
+                                A * std::sin(k * x),
+                                0.0 };
                     break;
                 }
                 case 25: case 26: {
@@ -1176,17 +1121,16 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
 
 namespace {
 // ============================================================================
-// test 31 campaign 三层 I/O（L1 schema 冻结于 output/test29_campaign/
-// l1_freeze_report.md；算法与 pilot29_diag.py 逐式一致）
+// test 31 campaign three-layer I/O. L1 schema frozen in
+// output/test29_campaign/l1_freeze_report.md; matches pilot29_diag.py.
 // ============================================================================
 
 struct L1Row {
     double min_rho = 0, min_p = 0, max_divb = 0, max_v = 0, max_bz = 0;
-    // 索引 0 = 上片 (y=+Ly/4)，1 = 下片 (y=−Ly/4)
+    // index 0 = upper sheet (y=+Ly/4), 1 = lower sheet (y=−Ly/4)
     double psi[2] = {0, 0}, xX[2] = {0, 0}, xO[2] = {0, 0};
     double ezB[2] = {0, 0}, wisl[2] = {0, 0}, vout[2] = {0, 0};
-    // schema v2（AB/AN/ABN 档物理信号）：片位 y（|Jz| 峰行，随动/漂移信号）
-    // 与 X 列上片两侧 ±3.0 处的带符号 vy（入流；随动修正 dyX/dt 离线做）
+    // schema v2: sheet y (|Jz| peak row) and signed vy at ±3.0 about it
     double yX[2] = {0, 0}, vinp[2] = {0, 0}, vinm[2] = {0, 0};
 };
 
@@ -1196,14 +1140,14 @@ struct CampaignState {
     double next_l1 = 0.0, next_ckpt = 0.0, next_flush = 50.0, next_coarse = 50.0;
     int n_l2 = 0;
     int fired_plateau = 0, fired_island = 0, fired_burst = 0, armed_island = 0;
-    std::vector<double> pending;   // 平台窗内追加帧的计划时刻
-    std::vector<double> ea;        // EA 滚动缓冲（40 行 = Δt 20）
+    std::vector<double> pending;   // scheduled extra frames in plateau window
+    std::vector<double> ea;        // EA rolling buffer (40 rows = Δt 20)
     double prev_psi[2] = {0, 0};
     double prev_t = -1.0;
-    std::vector<double> az, jz, lap;   // 工作数组（nx*ny，重复使用）
+    std::vector<double> az, jz, lap;   // reusable nx*ny work arrays
 };
 
-// 通量函数 + 片诊断（cell 中心量；与 pilot 的 numpy 实现同式）。
+// Flux function + per-sheet diagnostics (cell-centred; same formulas as pilot).
 L1Row campaign_l1_compute(const Grid& w, const RunConfig& cfg,
                           double dx, double dy, CampaignState& cs) {
     const int nx = cfg.nx, ny = cfg.ny;
@@ -1213,7 +1157,7 @@ L1Row campaign_l1_compute(const Grid& w, const RunConfig& cfg,
     cs.az.assign((size_t)nx * ny, 0.0);
     cs.jz.assign((size_t)nx * ny, 0.0);
     cs.lap.assign((size_t)nx * ny, 0.0);
-    // 2-leg 线积分通量函数（首列沿 y 积 Bx，再沿 x 积 By 的面均值）
+    // Two-leg line-integral flux function (Bx along first column, then By in x)
     {
         double a = 0.0;
         for (int j = 0; j < ny; ++j) { a += W(0, j, 5) * dy; cs.az[id(0, j)] = a; }
@@ -1243,8 +1187,7 @@ L1Row campaign_l1_compute(const Grid& w, const RunConfig& cfg,
     }
     const double ys[2] = { +0.25 * Ly, -0.25 * Ly };
     for (int s = 0; s < 2; ++s) {
-        // 片行 = 带内 |y−ys|≤5.0 中 x 平均 |Jz| 最大的行
-        // （v2 起带宽 2.5→5.0：非对称档片沿入流方向向强场侧漂移，需跟踪）
+        // Sheet row = max x-averaged |Jz| within |y−ys| ≤ 5.0 (tracks drift)
         int jrow = -1; double best = -1.0;
         for (int j = 0; j < ny; ++j) {
             const double yc = cfg.y0 + (j + 0.5) * dy;
@@ -1260,13 +1203,13 @@ L1Row campaign_l1_compute(const Grid& w, const RunConfig& cfg,
             if (cs.az[id(i, jrow)] < cs.az[id(iX, jrow)]) iX = i;
         }
         r.psi[s] = cs.az[id(iO, jrow)] - cs.az[id(iX, jrow)];
-        // X = |Jz| 更大的极值点（电流片在 X 处收缩）
+        // X-point = extremum with larger |Jz|
         const int iXpt = (std::fabs(cs.jz[id(iX, jrow)]) >= std::fabs(cs.jz[id(iO, jrow)]))
                          ? iX : iO;
         const int iOpt = (iXpt == iX) ? iO : iX;
         r.xX[s] = cfg.x0 + (iXpt + 0.5) * dx;
         r.xO[s] = cfg.x0 + (iOpt + 0.5) * dx;
-        // Method B：X 点完整 Ez = −(v×B)z + Hall + hyper
+        // Method B: full Ez at X = −(v×B)z + Hall + hyper
         {
             const int i = iXpt, j = jrow;
             const int ip = (i + 1) % nx, im = (i + nx - 1) % nx;
@@ -1280,14 +1223,15 @@ L1Row campaign_l1_compute(const Grid& w, const RunConfig& cfg,
                        + (cfg.hall_di / rho) * (Jx * By - Jy * Bx)
                        - cfg.eta_H * cs.lap[id(i, j)];
         }
-        // v2：X 列上片两侧 ±3.0 处的带符号 vy（入流诊断原料；周期折返安全）
+        // Signed vy at ±3.0 about the sheet row (inflow diagnostic)
         {
             const int joff = int(3.0 / dy + 0.5);
             r.vinp[s] = W(iXpt, (jrow + joff) % ny, 2);
             r.vinm[s] = W(iXpt, (jrow - joff + ny) % ny, 2);
         }
-        // 岛宽：O 列上过分离线值的等值段（v2：锚定当前片行 jrow 而非初始
-        // 片位，漂移后不失锚；无岛时退化为全高——消费端按 armed 规则处理）
+        // Island width: contour segment through the O column above the
+        // separatrix value, anchored to the current sheet row. Degenerates to
+        // full height when no island — consumers apply the armed rule.
         {
             const double sep = cs.az[id(iXpt, jrow)];
             const int j0 = jrow;
@@ -1297,7 +1241,7 @@ L1Row campaign_l1_compute(const Grid& w, const RunConfig& cfg,
             while (jhi < ny - 1 && sgn * (cs.az[id(iOpt, jhi + 1)] - sep) > 0.0) ++jhi;
             r.wisl[s] = (jhi - jlo + 1) * dy;
         }
-        // 片带出流：|y−ys|≤1 内 max|vx|
+        // Outflow: max |vx| within |y−ys| ≤ 1
         for (int j = 0; j < ny; ++j) {
             const double yc = cfg.y0 + (j + 0.5) * dy;
             if (std::fabs(yc - ys[s]) > 1.0) continue;
@@ -1308,14 +1252,12 @@ L1Row campaign_l1_compute(const Grid& w, const RunConfig& cfg,
     return r;
 }
 
-// L2 事件快照：小端二进制，头 6 个 double {31, nx_out, ny_out, stride, t, nvar}
-// 后接 float32 数据（k 外层、j 中层、i 内层；stride 为格点抽样步长）。
+// L2 event snapshot: little-endian binary, 6-double header
+// {31, nx_out, ny_out, stride, t, nvar} then float32 data (k, j, i order).
 void write_l2_frame(const Grid& w, const RunConfig& cfg, double t,
                     const std::string& tag, int stride, CampaignState& cs) {
-    // L2_STRIDE 环境变量：所有 L2 帧的抽样步长统一乘以该系数（默认 1 =
-    // 行为不变）。纯 I/O 体积开关，供大箱（2048×1024）在 1.2GB quota 下
-    // 使用（L2_STRIDE=4 → 单帧 75.5MB→4.7MB）。帧头 stride 字段如实记录，
-    // 读取端无需改动。
+    // L2_STRIDE env multiplies every L2 frame stride (I/O size only, default 1).
+    // Header records the actual stride, so readers need no change.
     static const int l2_mult = [] {
         const char* s = std::getenv("L2_STRIDE");
         const int v = s ? std::atoi(s) : 1;
@@ -1348,7 +1290,7 @@ void write_l2_frame(const Grid& w, const RunConfig& cfg, double t,
     std::cout << "[campaign] L2 frame " << cs.n_l2 << "/15: " << name << "\n";
 }
 
-// L3 滚动 checkpoint：写 .tmp 后原子替换，保留最近 1 份。
+// L3 rolling checkpoint: write .tmp, atomic rename, keep latest only.
 void write_ckpt(const CampaignState& cs, const Grid& w, const FaceField2D* ff,
                 const RunConfig& cfg, double t, int step) {
     const std::string tmp = cs.ckpt_path + ".tmp";
@@ -1420,7 +1362,7 @@ bool load_ckpt(CampaignState& cs, Grid& w, FaceField2D* ff,
     return bool(f);
 }
 
-// L1 行 + L2 触发器。返回 false 表示状态非物理（调用方应终止主循环）。
+// L1 row + L2 triggers. Returns false on unphysical state (caller stops).
 bool campaign_l1_tick(CampaignState& cs, const Grid& w, const RunConfig& cfg,
                       DivergenceController& divb, double dx, double dy,
                       double t, double dt, int step) {
@@ -1442,8 +1384,8 @@ bool campaign_l1_tick(CampaignState& cs, const Grid& w, const RunConfig& cfg,
     cs.l1 << buf;
     if (t >= cs.next_flush - 1e-9) { cs.l1.flush(); cs.next_flush += 50.0; }
 
-    // --- L2 触发器 ---
-    // EA 滚动缓冲（两片平均的 Method A 速率）
+    // --- L2 triggers ---
+    // EA rolling buffer (two-sheet mean Method A rate)
     if (cs.prev_t >= 0.0 && t > cs.prev_t) {
         const double ea = 0.5 * (std::fabs(r.psi[0] - cs.prev_psi[0])
                                + std::fabs(r.psi[1] - cs.prev_psi[1])) / (t - cs.prev_t);
@@ -1451,7 +1393,7 @@ bool campaign_l1_tick(CampaignState& cs, const Grid& w, const RunConfig& cfg,
         if (cs.ea.size() > 40) cs.ea.erase(cs.ea.begin());
     }
     cs.prev_psi[0] = r.psi[0]; cs.prev_psi[1] = r.psi[1]; cs.prev_t = t;
-    // 平台起点：40 行（Δt=20）全部落在中位数 ±20% 内且中位数 > 1e-3
+    // Plateau onset: all 40 rows (Δt=20) within median ±20% and median > 1e-3
     if (!cs.fired_plateau && cs.ea.size() >= 40) {
         std::vector<double> tmp(cs.ea);
         std::nth_element(tmp.begin(), tmp.begin() + tmp.size() / 2, tmp.end());
@@ -1464,7 +1406,7 @@ bool campaign_l1_tick(CampaignState& cs, const Grid& w, const RunConfig& cfg,
             cs.pending = { t + 5.0, t + 10.0, t + 15.0 };
         }
     }
-    // 平台窗内追加帧
+    // Extra frames within the plateau window
     for (size_t k = 0; k < cs.pending.size();) {
         if (t >= cs.pending[k] - 1e-9) {
             char tag[16]; std::snprintf(tag, sizeof tag, "plateau%d",
@@ -1473,11 +1415,9 @@ bool campaign_l1_tick(CampaignState& cs, const Grid& w, const RunConfig& cfg,
             cs.pending.erase(cs.pending.begin() + long(k));
         } else ++k;
     }
-    // 岛宽过 Ly/2（armed 规则 + 2026-07-18 修复×2，经用户批准）：
-    //  1) 退化排除：wisl==Ly 是等值段扫描失败的带内哨兵（非测量值），
-    //     曾致 AB2 t=4.5 / AB1big t=8 误燃烧帧位；有效帧须 < Ly-0.5dy。
-    //  2) ψ 门槛随域高缩放（0.15 标定于 Ly=51.2；固定值在大箱被
-    //     kick 初始通量 ψ0=0.01Ly/π 直接越过而失效）。Ly=51.2 档行为不变。
+    // Island Ly/2 crossing (armed rule): wisl==Ly is a failed-scan sentinel,
+    // so valid frames require wisl < Ly − 0.5dy; the ψ gate scales with Ly
+    // (0.15 calibrated at Ly=51.2).
     const bool cross0 = r.wisl[0] >= 0.5 * Ly && r.wisl[0] < Ly - 0.5 * dy;
     const bool cross1 = r.wisl[1] >= 0.5 * Ly && r.wisl[1] < Ly - 0.5 * dy;
     const double wmax = std::max(r.wisl[0], r.wisl[1]);
@@ -1487,12 +1427,12 @@ bool campaign_l1_tick(CampaignState& cs, const Grid& w, const RunConfig& cfg,
         cs.fired_island = 1;
         write_l2_frame(w, cfg, t, "islandLy2", 1, cs);
     }
-    // 暴发：max|v| ≥ 2 cA0
+    // Burst: max|v| ≥ 2 cA0
     if (!cs.fired_burst && dg.max_v >= 2.0) {
         cs.fired_burst = 1;
         write_l2_frame(w, cfg, t, "burst", 1, cs);
     }
-    // 每 t=50 粗网帧（stride 2；预留 3 帧给事件 → n_l2 < 12 才写）
+    // Coarse frame every t=50 (stride 2; 3 slots reserved for events)
     if (t >= cs.next_coarse - 1e-9) {
         if (cs.n_l2 < 12 && t < cfg.t_end - 1.0)
             write_l2_frame(w, cfg, t, "coarse", 2, cs);
@@ -1503,7 +1443,7 @@ bool campaign_l1_tick(CampaignState& cs, const Grid& w, const RunConfig& cfg,
         && std::isfinite(dg.max_divB) && dg.min_rho > 0.0 && dg.min_p > 0.0;
 }
 
-// 初始化（含 RESUME=1 续跑）。返回是否续跑。
+// Init (RESUME=1 continues from checkpoint). Returns true if resumed.
 bool campaign_init(CampaignState& cs, Grid& w, DivergenceController& divb,
                    const RunConfig& cfg, double dx, double dy,
                    double& t, int& step) {
@@ -1518,7 +1458,7 @@ bool campaign_init(CampaignState& cs, Grid& w, DivergenceController& divb,
     if (want_resume) {
         FaceField2D* ff = divb.mutable_face_field();
         if (ff && load_ckpt(cs, w, ff, cfg, t, step)) {
-            // 截掉 checkpoint 之后的 L1 行（避免重复区间）
+            // Drop L1 rows past the checkpoint time (no duplicate interval)
             std::vector<std::string> keep;
             {
                 std::ifstream in(cs.l1_path);
@@ -1539,7 +1479,7 @@ bool campaign_init(CampaignState& cs, Grid& w, DivergenceController& divb,
         }
         std::cout << "[campaign] RESUME=1 but no usable checkpoint, fresh start\n";
     }
-    // 全新启动：表头（含 t=0 压平衡 RMS 硬检查值）+ t=0 行 + L2 t0 帧
+    // Fresh start: header (with t=0 pressure-balance RMS) + t=0 row + t0 frame
     double pt_mean = 0.0, pt_rms = 0.0;
     {
         const long long n = (long long)cfg.nx * cfg.ny;
@@ -1573,15 +1513,15 @@ bool campaign_init(CampaignState& cs, Grid& w, DivergenceController& divb,
              "up_yX,up_vinp,up_vinm,lo_yX,lo_vinp,lo_vinm\n";
     std::cout << "[campaign] ptot_rms0 = " << pt_rms << " (hard check #1)\n";
 
-    // 广义双片 IC 静态自检（test 31）：两片上下游 B/ρ 采样应互为镜像，
-    // 逐档参数按 β_min 规则生成并打印，供与 CS2008 Table 1 对照。
+    // Double-sheet IC self-check (test 31): sampled up/downstream B and rho
+    // should mirror between sheets; tier params printed vs CS2008 Table 1.
     if (cfg.test == 31) {
         const double Ly31 = cfg.y1 - cfg.y0, q = 0.25 * Ly31;
         const double dyc = Ly31 / cfg.ny;
         auto samp = [&](double ysamp, int k) {
             int j = int((ysamp - cfg.y0) / dyc - 0.5 + 0.5);
             j = std::max(0, std::min(cfg.ny - 1, j));
-            return w[2][j + 2][k];   // x = 第一列（扰动为小量）
+            return w[2][j + 2][k];   // first column (perturbation is small)
         };
         const double off = std::min(5.0, 0.4 * q);
         struct { const char* name; double y_in, y_out; } sh[2] = {
@@ -1610,9 +1550,8 @@ bool campaign_init(CampaignState& cs, Grid& w, DivergenceController& divb,
                   << " beta01=" << P1 / (0.5 * cfg.dh_B01 * cfg.dh_B01)
                   << " beta02=" << P2 / (0.5 * cfg.dh_B02 * cfg.dh_B02) << "\n";
 
-        // kick 生效自检（2026-07-13 修复：扰动幅值 0.01·B0 不乘 Bmax）。
-        // 直接采样编译进本二进制的 az_coh/az_total —— 若二进制仍是误乘
-        // Bmax 的旧码，此处 psi0_coh 与 dBrand 会按 Bmax 放大（AB2 为 3×）。
+        // Kick self-check: sample az_coh/az_total compiled into this binary.
+        // Detects stale binaries with the old Bmax-scaled perturbation bug.
         {
             const auto pp = adh_params_from_config(cfg);
             const double Lxk = cfg.x1 - cfg.x0, Lyk = cfg.y1 - cfg.y0;
@@ -1621,7 +1560,7 @@ bool campaign_init(CampaignState& cs, Grid& w, DivergenceController& divb,
                 * (pp.az_coh(0.25 * Lxk, qk) - pp.az_coh(-0.25 * Lxk, qk));
             const double psi0_expect = pp.scale * 0.02 * Lyk
                 / (2.0 * 3.14159265358979323846);
-            double db_half = 0.0;   // max amp_br·|hash| ≈ amp_br/2（沿片行采样）
+            double db_half = 0.0;   // max amp_br·|hash| ≈ amp_br/2 along sheet row
             for (int i = 0; i < cfg.nx; ++i) {
                 const double xs = cfg.x0 + (i + 0.5) * pp.hgrid;
                 const double a = pp.az_total(xs, qk) - pp.az_eq(qk)
@@ -1673,11 +1612,10 @@ OutputData run_simulation(const RunConfig& cfg) {
     if (cfg.rho_floor > 0.0)
         std::cout << "  density floor = " << cfg.rho_floor << ",  p_floor = " << cfg.p_floor << "\n";
 
-    // 确保输出目录存在（label 非空时为 output/{label}，否则为 output）
-    // 必须在写 snap000 之前创建，否则首帧快照会因目录不存在而静默失败
+    // Create output dir before the first snapshot (else it fails silently).
     std::filesystem::create_directories(cfg_outdir(cfg));
 
-    // test 31 campaign 三层 I/O 初始化（含 RESUME=1 续跑）
+    // test 31 campaign I/O init (RESUME=1 supported)
     CampaignState cs;
     bool campaign_resumed = false;
     if (cfg.campaign_io) {
@@ -1783,7 +1721,7 @@ OutputData run_simulation(const RunConfig& cfg) {
             next_snap_t += cfg.output_dt;
         }
 
-        // campaign 三层 I/O：L1 行（每 l1_dt）→ L2 触发器 → L3 checkpoint
+        // Campaign I/O: L1 row (every l1_dt) → L2 triggers → L3 checkpoint
         if (cfg.campaign_io) {
             const double tdg = omp_get_wtime();
             bool ok = true;

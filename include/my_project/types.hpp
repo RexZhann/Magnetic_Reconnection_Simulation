@@ -10,11 +10,10 @@ namespace my_project {
 
 inline constexpr int NVAR = 9;
 
-// 定长状态向量（原 std::vector<double>）。性能优化：栈上定长，消除
-// hlld_flux/pri2con 等热路径每次调用的堆分配；元素语义与运算顺序不变。
-// 构造函数签名兼容旧 vector 用法：Vec(n)、Vec(n, v)、Vec{...}。
+// Fixed-size stack state vector (was std::vector<double>): removes heap
+// allocation from hot paths. Constructors keep the old vector signatures.
 struct Vec : std::array<double, NVAR> {
-    Vec() : std::array<double, NVAR>{} {}          // 零初始化（与旧 vector 一致）
+    Vec() : std::array<double, NVAR>{} {}          // zero-initialised
     explicit Vec(int) : Vec() {}
     Vec(int, double v) { fill(v); }
     Vec(std::initializer_list<double> il) : Vec() {
@@ -45,10 +44,9 @@ enum class BC { Transmissive, Periodic };
 enum class SolverKind { FORCE = 0, HLLD = 1 };
 enum class DivBCleaningKind { None = 0, GLM = 1, CT = 2 };
 
-// 霍尔短波稳定化方案（仅 CT 模式有效）。
-// NONE      : 无额外稳定化，依赖 RK4 Hall CFL 本身
-// HYPER_RES : 4 阶超电阻 −η_H ∇²Jz（原有方案，test 20/21）
-// HALL_HLL  : 哨声波速度 HLL 1 阶迎风扩散（Path B，test 23）// experimental, deprioritized
+// Hall short-wave stabilization (CT mode only).
+// NONE: RK4 Hall CFL alone; HYPER_RES: −η_H·∇²Jz (mainline, test 20/21);
+// HALL_HLL: whistler-speed upwind diffusion (Path B, test 23, experimental).
 enum class HallStabKind { NONE = 0, HYPER_RES = 1, HALL_HLL = 2 };
 
 struct RunConfig {
@@ -64,84 +62,65 @@ struct RunConfig {
     BC bcy = BC::Transmissive;
     SolverKind solver = SolverKind::HLLD;
     DivBCleaningKind divb = DivBCleaningKind::GLM;
-    // Uniform resistivity η for resistive MHD (0 = ideal MHD).
-    // Only active for CT divergence control; explicit stability requires
-    // η ≤ min(dx,dy)² / (2 dt), which is automatically satisfied when
-    // the ideal-MHD CFL condition is the tighter constraint.
+    // Uniform resistivity η (0 = ideal MHD). CT mode only.
     double eta = 0.0;
 
-    // Ion inertial length d_i = c/ω_pi for Hall MHD (0 = resistive/ideal MHD).
-    // Adds the Hall term (d_i/ρ) J × B to the induction equation.
-    // Only active in CT mode.  Explicit Hall CFL: dt ≤ min(dx,dy)²/(d_i·v_A)
-    // is enforced automatically by compute_dt.
+    // Ion inertial length d_i for the Hall term (0 = off). CT mode only;
+    // the Hall CFL is enforced by compute_dt.
     double hall_di = 0.0;
 
-    // 4th-order hyper-resistivity coefficient η_H (0 = off).
-    // Adds E_hyper = −η_H ∇²Jz to the corner EMF, giving ∂B/∂t = −η_H ∇⁴B.
-    // Only active in CT mode.  Explicit CFL: dt ≤ min(dx,dy)⁴ / (32 η_H)
-    // is enforced automatically by compute_dt.
+    // 4th-order hyper-resistivity η_H (0 = off). CT mode only;
+    // CFL dt ≤ h⁴/(32 η_H) is enforced by compute_dt.
     double eta_H = 0.0;
 
-    // Snapshot output interval [simulation time units].
-    // 0 = write only the final state (default).
-    // >0 = also write snap000.dat, snap001.dat, ... at every output_dt interval
-    // starting from t=0.  Useful for animation and time-series diagnostics.
+    // Snapshot interval (0 = final state only; >0 writes snapNNN.dat from t=0).
     double output_dt = 0.0;
 
-    // Density and pressure floors applied after each sweep (0 = disabled).
-    // Prevents density cavitation from causing dt → 0 at reconnection sites.
+    // Density/pressure floors applied after each sweep (0 = disabled).
     double rho_floor = 0.0;
     double p_floor   = 0.0;
 
-    // Non-ideal sub-cycling: when true, the Hall and resistive CFL constraints
-    // are removed from the global hyperbolic timestep and handled by sub-cycling
-    // the non-ideal (resistive + Hall + hyper) block N_sub times per global step.
-    // When false (default), behaviour is identical to the original single-step path.
+    // Non-ideal sub-cycling: removes Hall/resistive CFL from the global dt,
+    // sub-cycling the non-ideal block N_sub times per step instead.
     bool subcycle_nonideal = false;
-    int  n_subcycle_max    = 100;   // safety cap on N_sub; a warning is printed if hit
+    int  n_subcycle_max    = 100;   // safety cap; warning printed if hit
 
-    // 霍尔稳定化方案选择（见 HallStabKind 注释）。
-    // 默认 NONE：依赖 RK4 Hall CFL；test 20/21 显式设为 HYPER_RES；test 23 设为 HALL_HLL。
+    // Hall stabilization scheme (see HallStabKind).
     HallStabKind hall_stab = HallStabKind::NONE;
 
-    // 输出标签：若非空，输出文件写入 output/{label}/ 子目录。
-    // CLI 第 8 参数可覆盖。为空时与旧版行为一致（写入 output/）。
+    // Output label: non-empty writes to output/{label}/ (CLI arg 8).
     std::string label = "";
 
-    // test 25 非对称重联扰动幅值 ψ₀（CLI 第 9 参数可覆盖；默认 0.2）
+    // test 25 perturbation amplitude ψ0 (CLI arg 9)
     double psi0 = 0.2;
 
-    // test 27 非对称度扫描（CS2008 对标）：B2 与 ρ1 可配，B1=1、ρ2=1 固定。
-    // P_total 在 IC 构造时按 max(B²)/2 + 1.0 规则自动计算。
-    // CLI 第 11/12 参数可覆盖；默认值 = R2 构型（与 test 25 相同的场/密度比）。
+    // test 27 asymmetry scan: B2 and rho1 configurable, B1 = rho2 = 1 fixed
+    // (CLI 11/12; defaults = R2 configuration).
     double asym_B2   = 2.0;
     double asym_rho1 = 2.0;
 
-    // test 28 Dirichlet inflow 标量边界：y 方向 ghost 的 ρ/p 固定为上游初始
-    // 渐近值（速度零梯度不变、B 仍走 CT 角点 EMF 指定 E_z 方案）。
-    // 目的：闭合 driven 长时程的质量收支（零梯度边界无固定质量库 → 空化崩溃）。
+    // test 28 Dirichlet inflow scalars: fix y-ghost rho/p to upstream values
+    // so long driven runs keep a mass reservoir (v/B unchanged).
     bool   dirichlet_y_scalars = false;
-    double bc_rho_top = 0.0, bc_p_top = 0.0;   // y=y1 侧（弱场 B1、密度 ρ1）
-    double bc_rho_bot = 0.0, bc_p_bot = 0.0;   // y=y0 侧（强场 B2、密度 ρ2）
+    double bc_rho_top = 0.0, bc_p_top = 0.0;   // y=y1 side (weak field B1)
+    double bc_rho_bot = 0.0, bc_p_bot = 0.0;   // y=y0 side (strong field B2)
 
-    // driven reconnection（test 26）：y 方向 inflow 边界指定恒定 out-of-plane
-    // 电场 E_z（代码符号约定，0 = 关闭）。CT 更新中把 J=0 和 J=ny 两排角点
-    // EMF 直接设为该值，通过 Faraday 定律持续注入上游磁通（E×B 入流）。
-    // 只对 CT + bcy=Transmissive 生效。注意符号：本问题重联 E_z < 0
-    // （X 点 Jz < 0），所以驱动值也必须为负才是入流方向。
+    // test 26 driven reconnection: constant boundary Ez (0 = off), applied to
+    // both y-boundary corner-EMF rows. CT + transmissive bcy only.
+    // Must be negative here — reconnection Ez < 0, so only a negative drive
+    // gives inflow on both sides.
     double driven_ez = 0.0;
 
-    // test 31 campaign 三层 I/O（L1 schema 已在 Step 0 冻结，见
-    // output/test29_campaign/l1_freeze_report.md）：
-    //   L1 每 l1_dt 追加一行诊断 CSV（每 t=50 flush）；
-    //   L2 事件触发 float32 快照（上限 15 帧）；
-    //   L3 滚动 checkpoint（每 ckpt_dt，保留最近 1 份；RESUME=1 续跑）。
+    // test 31 campaign three-layer I/O (L1 schema frozen in
+    // output/test29_campaign/l1_freeze_report.md): L1 CSV rows every l1_dt,
+    // L2 event-triggered float32 snapshots (cap 15), L3 rolling checkpoint
+    // every ckpt_dt (RESUME=1 continues).
     bool   campaign_io = false;
     double l1_dt   = 0.5;
-    double ckpt_dt = 10.0;   // 本机版加密到 t=10
+    double ckpt_dt = 10.0;
 
-    // test 31 广义双片（CS2008 Eq. 3-4）：01 = 外侧，02 = 内侧。
-    // CLI 13/14/15/16 覆盖；默认全 1 = Sym 档。
+    // test 31 double sheet (CS2008 Eq. 3-4): 01 = outer, 02 = inner.
+    // CLI 13-16; all 1 = symmetric tier.
     double dh_B01 = 1.0, dh_B02 = 1.0, dh_rho01 = 1.0, dh_rho02 = 1.0;
 };
 

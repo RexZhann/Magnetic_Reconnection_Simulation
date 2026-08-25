@@ -71,8 +71,8 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
     // ------------------------------------------------------------------
     int    N_sub   = 1;
     double dt_sub  = dt;
-    double dt_eta  = std::numeric_limits<double>::infinity();  // +∞ = 限制不适用
-    double dt_hall = std::numeric_limits<double>::infinity();  // +∞ = 限制不适用
+    double dt_eta  = std::numeric_limits<double>::infinity();  // inf = inactive
+    double dt_hall = std::numeric_limits<double>::infinity();  // inf = inactive
 
     if (subcycle_nonideal_ && (eta_ > 0.0 || hall_di_ > 0.0)) {
         constexpr double pi = 3.14159265358979323846;
@@ -82,13 +82,10 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
         if (eta_ > 0.0)
             dt_eta = mincell * mincell / (2.0 * eta_);
 
-        // 霍尔稳定化子步 CFL —— 根据方案选择不同公式：
-        //   HYPER_RES / NONE : RK4 稳定性，使用 vA = |B|/√ρ
-        //   HALL_HLL         : 一阶迎风扩散，使用 |B|/ρ（更严格）
+        // Hall sub-step CFL: HALL_HLL uses |B|/ρ (stricter); others RK4 with vA.
         if (hall_di_ > 0.0) {
             if (hall_stab_ == HallStabKind::HALL_HLL) {
-                // HLL 稳定性条件：c_w·dt/h ≤ 1，c_w = π·di·|B|/(ρ·h)
-                // → dt = h² / (π·di·max(|B|/ρ))
+                // c_w·dt/h ≤ 1 with c_w = π·di·|B|/(ρ·h)
                 double max_b2_rho2 = 1e-14;
                 #pragma omp parallel for collapse(2) reduction(max:max_b2_rho2) schedule(static)
                 for (int i = 2; i < nx + 2; ++i)
@@ -102,7 +99,7 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
                 dt_hall = cfl_ * mincell * mincell
                           / (pi * hall_di_ * std::sqrt(max_b2_rho2));
             } else {
-                // RK4 稳定性（|ω·dt| < 2√2 ≈ 2.83），使用 vA = |B|/√ρ
+                // RK4 stability |ω·dt| < 2√2 ≈ 2.83, with vA = |B|/√ρ
                 double max_va2 = 1e-14;
                 #pragma omp parallel for collapse(2) reduction(max:max_va2) schedule(static)
                 for (int i = 2; i < nx + 2; ++i)
@@ -139,7 +136,7 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
     // ------------------------------------------------------------------
     // N_sub == 1: original single-step path (bitwise identical to old code).
     // ------------------------------------------------------------------
-    // 根据稳定化方案选择调用哪个函数（单步和子循环路径均使用此 lambda）
+    // Stabilization dispatch, shared by single-step and sub-cycle paths.
     const auto apply_stab = [&](double dt_loc) {
         const double ts = omp_get_wtime();
         switch (hall_stab_) {
@@ -172,8 +169,8 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
         add_resistive_correction(w, nx, ny, dt, dx, dy);
         apply_stab(dt);
         timed_hall(dt);
-        // driven BC：所有贡献叠加完后，把 y 边界两排角点 EMF 覆写为指定常数，
-        // 保证边界 E_z 的时间积分恰为 driven_ez_·dt
+        // Driven BC: overwrite y-boundary corner EMFs last so the boundary
+        // Ez time integral is exactly driven_ez_·dt.
         if (driven_ez_ != 0.0) override_inflow_ez(nx, ny, driven_ez_);
         timed_faraday(dt);
     } else {
@@ -190,15 +187,14 @@ void CTDivergenceControl::post_step(Grid& w, int nx, int ny,
             "  dt_sub=%.3e  N_sub=%d  dt_local=%.3e\n",
             current_t_, dt, dt_eta, dt_hall, dt_sub, N_sub, dt_local);
 
-        // 步骤 1：理想 Faraday 推进（一次，全局 dt_hyp）
-        // driven BC：理想步内把边界 E_z 覆写为 driven_ez_（全额注入一次），
-        // 子循环各步再把边界排清零，使全步边界 E_z 积分恰为 driven_ez_·dt
+        // Step 1: ideal Faraday once with full dt. Driven BC injects the full
+        // boundary Ez here; sub-steps zero it so the integral stays driven_ez_·dt.
         if (driven_ez_ != 0.0) override_inflow_ez(nx, ny, driven_ez_);
         timed_faraday(dt);
 
-        // 步骤 2：非理想子循环（每步使用当前面心 B）
+        // Step 2: non-ideal sub-cycling on the current face B.
         for (int sub = 0; sub < N_sub; ++sub) {
-            // 清零角点 EMF：每子步仅累积非理想贡献
+            // Zero corner EMF: each sub-step accumulates non-ideal terms only.
             tw = omp_get_wtime();
             for (int I = 0; I <= nx; ++I)
                 std::fill(face_.emf_z[I].begin(), face_.emf_z[I].end(), 0.0);
@@ -272,10 +268,8 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
             case 4: { constexpr double pi=3.14159265358979323846; (void)x;(void)y;
                       return 2.5/std::sqrt(4.0*pi); }
             case 11: case 12:
-            case 19: case 20: case 21: case 22: case 23: {
-                // Harris 电流片：由矢势线积分解析给出面心 Bx，初始 ∇·B = 0（机器精度）
+            case 19: case 20: case 21: case 22: case 23:
                 return harris_bx_face(x, y, dy, HarrisSheetParams{});
-            }
             case 25: case 26: {
                 AsymHarrisParams ap25_bx;
                 ap25_bx.psi0 = cfg.psi0;
@@ -285,9 +279,7 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
             case 29: return dh_bx_face(x, y, dy, dh_params_from_config(cfg));
             case 31: return adh_bx_face(x, y, dy, adh_params_from_config(cfg));
             case 15: {
-                // 45° Alfvén wave: Az = (y−x)/√2 + c·cos(2π(x+y)), c = 0.1/(2π√2)
-                // bx = [Az(x,y+½Δy) − Az(x,y−½Δy)] / Δy
-                //    = 1/√2 − 2c·sin(2π(x+y))·sin(π·Δy)/Δy
+                // 45° Alfvén wave: bx from Az = (y−x)/√2 + c·cos(2π(x+y)), c = 0.1/(2π√2)
                 constexpr double pi = 3.14159265358979323846;
                 constexpr double s2 = 1.41421356237309504880;
                 const double c = 0.1 / (2.0 * pi * s2);
@@ -306,10 +298,8 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
                       return std::sin(4.0*pi*x); }
             case 4:  (void)x;(void)y; return 0.0;
             case 11: case 12:
-            case 19: case 20: case 21: case 22: case 23: {
-                // Harris 电流片：由矢势线积分解析给出面心 By，初始 ∇·B = 0（机器精度）
+            case 19: case 20: case 21: case 22: case 23:
                 return harris_by_face(x, y, dx, HarrisSheetParams{});
-            }
             case 25: case 26: {
                 AsymHarrisParams ap25_by;
                 ap25_by.psi0 = cfg.psi0;
@@ -319,9 +309,7 @@ void CTDivergenceControl::initialize_faces_from_problem(const Grid& w, const Run
             case 29: return dh_by_face(x, y, dx, dh_params_from_config(cfg));
             case 31: return adh_by_face(x, y, dx, adh_params_from_config(cfg));
             case 15: {
-                // 45° Alfvén wave: Az = (y−x)/√2 + c·cos(2π(x+y)), c = 0.1/(2π√2)
-                // by = −[Az(x+½Δx,y) − Az(x−½Δx,y)] / Δx
-                //    = 1/√2 + 2c·sin(2π(x+y))·sin(π·Δx)/Δx
+                // 45° Alfvén wave: by from Az = (y−x)/√2 + c·cos(2π(x+y)), c = 0.1/(2π√2)
                 constexpr double pi = 3.14159265358979323846;
                 constexpr double s2 = 1.41421356237309504880;
                 const double c = 0.1 / (2.0 * pi * s2);
@@ -361,57 +349,35 @@ void CTDivergenceControl::fill_faces_from_cell_centered(const Grid& w, int nx, i
 }
 
 // ---------------------------------------------------------------------------
-// Resistive MHD correction: add η·Jz to corner EMF and η·Jz² (Ohmic heating)
-// to cell thermal pressure.
-//
-// Discrete current at corner (I,J)  [Tóth 2000, §5.1]:
-//   Jz[I][J] = (By[I][J] − By[I−1][J]) / Δx  −  (Bx[I][J] − Bx[I][J−1]) / Δy
-// where By[I][J] = face_.by[I][J] (y-face to the right of corner),
-//       Bx[I][J] = face_.bx[I][J] (x-face above the corner).
-//
-// Resistive EMF (induction equation with resistivity):
-//   ∂B/∂t = ∇×(v×B) + η∇²B  ≡  −∇×E_ideal + ∇×(η J)
-//   E_z_total = E_z_ideal + η Jz          ← added to face_.emf_z here
-//
-// Ohmic heating (energy equation):
-//   ∂e_th/∂t += η Jz²   →   δp = (γ−1) η Jz_cell² δt
-//   where Jz_cell = average of 4 surrounding corner Jz values.
-//
-// Reference for CT + resistivity:
-//   Balsara, D.S., Spicer, D.S. (1999). "A staggered mesh algorithm using
-//   high order Godunov fluxes to ensure solenoidal magnetic fields in MHD
-//   simulations." J. Comput. Phys. 149, 270–292.  doi:10.1006/jcph.1998.6153
-//   (Section 4 — resistive extension of CT)
+// Resistive correction: add η·Jz to corner EMF; Ohmic heating (γ−1)·η·Jz²·dt
+// to cell pressure (Jz_cell = mean of 4 corners).
+// Corner current [Tóth 2000 §5.1]:
+//   Jz[I][J] = (By[I][J] − By[I−1][J])/Δx − (Bx[I][J] − Bx[I][J−1])/Δy
+// CT + resistivity: Balsara & Spicer 1999, JCP 149, 270 (§4).
 // ---------------------------------------------------------------------------
 void CTDivergenceControl::add_resistive_correction(Grid& w, int nx, int ny,
                                                    double dt, double dx, double dy) {
     if (eta_ <= 0.0) return;
 
-    // -----------------------------------------------------------------------
-    // Step 1: Jz at every corner (I,J) from face-centred B (pre-Faraday).
-    // -----------------------------------------------------------------------
+    // Step 1: Jz at every corner from face-centred B (pre-Faraday).
     ScalarField Jz(nx + 1, std::vector<double>(ny + 1, 0.0));
 
     #pragma omp parallel for collapse(2) schedule(static)
     for (int I = 0; I <= nx; ++I) {
         for (int J = 0; J <= ny; ++J) {
-            // --- ∂By/∂x: right and left y-faces adjacent to corner (I,J) ---
-            // face_.by[i][j] is the y-face at x=(i+0.5)dx, y=j·dy; i ∈ [0,nx−1]
+            // ∂By/∂x: periodic wraps; transmissive clamps (0 at boundary corners).
             double byR, byL;
             if (bcx_ == BC::Periodic) {
-                // Periodic: corner I and corner nx are the same physical point.
                 int Ir = (I < nx) ? I      : 0;
                 int Il = (I > 0)  ? I - 1  : nx - 1;
                 byR = face_.by[Ir][J];
                 byL = face_.by[Il][J];
             } else {
-                // Transmissive: clamp to interior (gives 0 at boundary corners).
                 byR = face_.by[(I < nx) ? I     : nx - 1][J];
                 byL = face_.by[(I > 0)  ? I - 1 : 0     ][J];
             }
 
-            // --- ∂Bx/∂y: upper and lower x-faces adjacent to corner (I,J) ---
-            // face_.bx[i][j] is the x-face at x=i·dx, y=(j+0.5)dy; j ∈ [0,ny−1]
+            // ∂Bx/∂y
             double bxU, bxD;
             if (bcy_ == BC::Periodic) {
                 int Ju = (J < ny) ? J      : 0;
@@ -425,18 +391,11 @@ void CTDivergenceControl::add_resistive_correction(Grid& w, int nx, int ny,
 
             Jz[I][J] = (byR - byL) / dx - (bxU - bxD) / dy;
 
-            // Add resistive contribution to the corner EMF that will be used
-            // by update_faces_from_emf for the Faraday update.
             face_.emf_z[I][J] += eta_ * Jz[I][J];
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Step 2: Ohmic heating — add (γ−1) η Jz_cell² dt to cell pressure.
-    //   Jz at cell centre (i,j) = mean of 4 surrounding corner values.
-    //   The pressure update is consistent with the Ohmic term in the
-    //   total-energy equation:  ∂E/∂t += η Jz²  →  ∂p/∂t += (γ−1) η Jz².
-    // -----------------------------------------------------------------------
+    // Step 2: Ohmic heating — add (γ−1)·η·Jz_cell²·dt to cell pressure.
     #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < nx; ++i) {
         for (int j = 0; j < ny; ++j) {
@@ -446,19 +405,9 @@ void CTDivergenceControl::add_resistive_correction(Grid& w, int nx, int ny,
     }
 }
 
-// Hyper-resistive correction: add −η_H·∇²Jz to every corner EMF.
-//
-// With E_hyper = −η_H ∇²Jz and CT Faraday (∂B/∂t = −∇×E), the net effect
-// on a div-B-free field is ∂B/∂t = −η_H ∇⁴B (4th-order biharmonic damping).
-// This suppresses grid-scale magnetic noise with k⁴ selectivity.
-//
-// Algorithm:
-//   1. Compute Jz at every corner using the same face-B stencil as add_resistive_correction.
-//   2. Apply the 5-point Laplacian over corners: ∇²Jz ≈ (Jz[I+1,J]−2Jz[I,J]+Jz[I-1,J])/dx²
-//      + (Jz[I,J+1]−2Jz[I,J]+Jz[I,J-1])/dy².  Neighbours wrap periodically / clamp.
-//   3. face_.emf_z[I][J] −= η_H · ∇²Jz[I][J].
-//
-// Explicit stability: dt ≤ h⁴/(32·η_H) is enforced by compute_dt.
+// Hyper-resistive correction: add −η_H·∇²Jz to every corner EMF, giving
+// ∂B/∂t = −η_H·∇⁴B (biharmonic, k⁴-selective grid-noise damping).
+// Explicit stability dt ≤ h⁴/(32·η_H) is enforced by compute_dt.
 void CTDivergenceControl::add_hyper_resistive_correction(int nx, int ny,
                                                          double dx, double dy) {
     if (eta_H_ <= 0.0) return;
@@ -519,24 +468,10 @@ void CTDivergenceControl::add_hyper_resistive_correction(int nx, int ny,
     }
 }
 
-// Corner EMF via CT-Contact formula (Gardiner & Stone 2005, §4; eq. A9-A11).
-//
-//   E_CT = E_arithm
-//        + (1/8)(s_S − s_N)(δ_W − δ_E)   [y-direction contact correction]
-//        + (1/8)(s_W − s_E)(δ_S − δ_N)   [x-direction contact correction]
-//
-// where δ = E_numerical − E_centered (the upwind numerical dissipation),
-// and s = sign(mass flux) at the relevant interface (±1).
-// This steers the corner EMF toward the upwind side set by the contact wave
-// while preserving ∇·B = 0 to machine precision.
-//
-// Notation for interfaces surrounding corner (I,J):
-//   S = south x-face: emf_x_[I][Jm],  N = north x-face: emf_x_[I][Jp]
-//   W = west  y-face: emf_y_[Im][J],  E = east  y-face: emf_y_[Ip][J]
-//
-// For periodic BC, boundary EMFs are averaged first so that
-// emf_z[0][J] == emf_z[nx][J], ensuring identical Faraday increments on
-// both copies of the periodic boundary face.
+// Corner EMF via CT-Contact (Gardiner & Stone 2005 §4, eq. A9-A11):
+//   E_CT = E_arithm + (1/8)(s_S−s_N)(δ_W−δ_E) + (1/8)(s_W−s_E)(δ_S−δ_N)
+// with δ = E_numerical − E_centered and s = sign(mass flux) at each face.
+// Periodic BC: boundary EMFs are averaged first so emf_z[0] == emf_z[nx].
 void CTDivergenceControl::compute_corner_emf_from_interface_emfs(int nx, int ny) {
     if (bcx_ == BC::Periodic) {
         for (int j = 0; j < ny; ++j) {
@@ -581,13 +516,11 @@ void CTDivergenceControl::compute_corner_emf_from_interface_emfs(int nx, int ny)
             double E_arithm = 0.25*(emf_x_[I][Jm] + emf_x_[I][Jp]
                                   + emf_y_[Im][J]  + emf_y_[Ip][J]);
 
-            // numerical dissipation δ = E_numerical − E_centered at each face
             double dS = emf_x_[I][Jm]  - cemf_x_[I][Jm];
             double dN = emf_x_[I][Jp]  - cemf_x_[I][Jp];
             double dW = emf_y_[Im][J]  - cemf_y_[Im][J];
             double dE = emf_y_[Ip][J]  - cemf_y_[Ip][J];
 
-            // sign of mass flux at each surrounding face
             double sS = sgn_x_[I][Jm];
             double sN = sgn_x_[I][Jp];
             double sW = sgn_y_[Im][J];
@@ -600,16 +533,10 @@ void CTDivergenceControl::compute_corner_emf_from_interface_emfs(int nx, int ny)
     }
 }
 
-// driven reconnection BC：y 边界（J=0 下、J=ny 上）整排角点 EMF 覆写为 value。
-//
-// 原理：Faraday ∂Bx/∂t = −∂Ez/∂y，边界指定恒定 Ez 相当于以 E×B 漂移速率
-// v_in = Ez/Bx 持续把上游磁通对流进域内（上边界 Bx=+B1 → v_y=Ez/B1，
-// 下边界 Bx=−B2 → v_y=−Ez/B2；Ez<0 时两侧均为入流，磁通供给率相等 = |Ez|）。
-//
-// div-B 安全性：CT 的离散 ∇·B=0 由"面 B 增量 = 角点 EMF 的离散旋度"这一
-// 代数结构保证，与角点 EMF 的具体数值无关，覆写边界值不破坏机器精度。
-// 沿边界排 Ez 为常数 → ΔBy(边界 face) = (dt/dx)(Ez[i+1]−Ez[i]) = 0，
-// 即只向边界 Bx face 注入通量，不产生切向 By 污染。
+// Driven BC: overwrite both y-boundary corner-EMF rows with a constant Ez.
+// Ez < 0 gives E×B inflow on both sides at equal flux-supply rate |Ez|.
+// CT's discrete ∇·B = 0 is algebraic in the corner EMF, so the overwrite is
+// safe; constant Ez along the row means ΔBy = 0 (no tangential pollution).
 void CTDivergenceControl::override_inflow_ez(int nx, int ny, double value) {
     for (int I = 0; I <= nx; ++I) {
         face_.emf_z[I][0]  = value;
@@ -677,23 +604,14 @@ void CTDivergenceControl::apply_face_bc(int nx, int ny) {
 }
 
 // ---------------------------------------------------------------------------
-// Hall MHD correction: ∂B/∂t|_Hall = -∇ × [(d_i/ρ) J × B]
-//
-// Integrated with 4-stage Runge-Kutta (RK4) for numerical stability.
-//
-// Forward Euler applied to Hall whistler waves is unconditionally unstable
-// because Hall generates purely dispersive modes (|G| = sqrt(1+(ω·dt)²) > 1
-// for any dt > 0).  RK4 is stable for purely imaginary eigenvalues when
-// |ω·dt| < 2√2 ≈ 2.83; compute_dt guarantees this via the Hall CFL formula
-// with the π² correction factor.
-//
-// Reference: Tóth et al. (2008) J. Comput. Phys. 227, 6967-6984.
+// Hall correction: ∂B/∂t|_Hall = −∇×[(d_i/ρ) J×B], integrated with RK4.
+// Forward Euler is unconditionally unstable for whistlers (pure dispersion);
+// RK4 is stable for |ω·dt| < 2√2, guaranteed by the Hall CFL in compute_dt.
+// Reference: Tóth et al. 2008, JCP 227, 6967.
 // ---------------------------------------------------------------------------
 
-// Pure helper: compute Hall EMF at corners (emfz_out) and dBz/dt at cells
-// (Bz_rate_out) given face B fields (bx_in, by_in) and cell-centred Bz (Bz_in).
-// Density is taken from w[i+2][j+2][0] (unchanged during Hall RK4 stages).
-// Does NOT modify any class state.
+// Pure helper: Hall corner EMF (emfz_out) and cell dBz/dt (Bz_rate_out) from
+// face B and cell Bz. Density from w (fixed during RK4 stages). No class state.
 static void hall_stage(
     const ScalarField& bx_in,   // (nx+1)×ny  — face Bx
     const ScalarField& by_in,   // nx×(ny+1)  — face By
@@ -704,8 +622,7 @@ static void hall_stage(
     ScalarField& emfz_out,      // (nx+1)×(ny+1) — E_z^Hall
     ScalarField& Bz_rate_out    // nx×ny         — dBz/dt
 ) {
-    // 性能优化：scratch 静态复用（每子步 ×4 stage 调用曾各分配 5 个数组）。
-    // ponytail: 仅从串行上下文调用（post_step），static 无竞争；后续全量覆写，无需清零。
+    // ponytail: static scratch — serial caller only, fully overwritten each call.
     static ScalarField Jx_c, Jy_c, Jz_c, ExH, EyH;
     auto ensure = [](ScalarField& f, int n1, int n2) {
         if ((int)f.size() != n1 || (int)f[0].size() != n2)
@@ -715,7 +632,7 @@ static void hall_stage(
     ensure(ExH, nx, ny+1);    ensure(EyH, nx+1, ny);
     ensure(emfz_out, nx+1, ny+1); ensure(Bz_rate_out, nx, ny);
 
-    // 角点电流 + E_z^Hall 同一趟计算（原两个同形状循环合并，表达式与顺序不变）
+    // Corner currents and Hall Ez in one pass.
     #pragma omp parallel for collapse(2) schedule(static)
     for (int I = 0; I <= nx; ++I) {
         for (int J = 0; J <= ny; ++J) {
@@ -750,7 +667,7 @@ static void hall_stage(
             Jx_c[I][J] =  (Bz_up   - Bz_down ) / dy;
             Jy_c[I][J] = -(Bz_right - Bz_left) / dx;
 
-            // E_z^Hall at this corner (原独立循环合并至此，表达式不变)
+            // Hall Ez at this corner
             double rho_c = 0.25*(w[I+1][J+1][0] + w[I+2][J+1][0] +
                                  w[I+1][J+2][0] + w[I+2][J+2][0]);
             rho_c = std::max(rho_c, rho_floor);
@@ -815,8 +732,7 @@ static void faraday_advance(
     int nx, int ny, double dx, double dy, double fac,
     ScalarField& bx_out, ScalarField& by_out
 ) {
-    // 性能优化：直写输出（原先整数组拷贝后再原地更新）。
-    // a -= b 改为 out = in - b，同一表达式同一舍入；输出数组全量覆写。
+    // Writes outputs directly (no copy); same expressions, same rounding.
     if ((int)bx_out.size() != nx+1 || (int)bx_out[0].size() != ny)
         bx_out.assign(nx+1, std::vector<double>(ny, 0.0));
     if ((int)by_out.size() != nx || (int)by_out[0].size() != ny+1)
@@ -838,8 +754,7 @@ void CTDivergenceControl::add_hall_correction(Grid& w, int nx, int ny,
                                               double dt, double dx, double dy) {
     if (hall_di_ <= 0.0) return;
 
-    // 性能优化：RK4 stage 数组静态复用（原每次调用 13 次堆分配；子循环下
-    // 每全局步调用 N_sub 次）。仅串行上下文调用；各数组均被全量覆写。
+    // ponytail: static RK4 scratch — serial caller only, fully overwritten.
     static ScalarField Bz0, emfz1, emfz2, emfz3, emfz4,
                        kBz1, kBz2, kBz3, kBz4, bx_tmp, by_tmp, Bz_tmp;
     if ((int)Bz0.size() != nx || (int)Bz0[0].size() != ny) {
@@ -901,20 +816,11 @@ void CTDivergenceControl::add_hall_correction(Grid& w, int nx, int ny,
 }
 
 // ---------------------------------------------------------------------------
-// Hall-HLL 哨声波速 HLL 1 阶迎风扩散稳定化（Path B）
-//
-// 推导：哨声波以波速 c_w = π·di·|B|_角/(ρ_角·mincell) 沿磁场方向传播。
-// 将该速度作为 HLL 扩散系数，对 By 和 Bx 各施加一阶迎风差分，
-// 等价于向角点 EMF 添加：
-//   δEz[I][J] = +(c_w/2)·(By_right − By_left)   ← By 在 x 方向正扩散
-//              −(c_w/2)·(Bx_above − Bx_below)   ← Bx 在 y 方向正扩散
-//
-// 对应 ∂By/∂t 贡献：+(c_w·dx/2)·∂²By/∂x²  > 0（稳定）
-// 对应 ∂Bx/∂t 贡献：+(c_w·dy/2)·∂²Bx/∂y²  > 0（稳定）
-//
-// 稳定性条件：c_w·dt/mincell ≤ 1，由 compute_dt 中的 smax_hll 项保证。
-// 注意：该方案将哨声波近似为纯扩散（过阻尼，γ/ω ≈ π/2），
-// 与 Iwasaki & Tomida (2025) Hall-HLL 描述一致。
+// Hall-HLL stabilization (Path B): first-order upwind diffusion at whistler
+// speed c_w = π·di·|B|/(ρ·mincell), added to the corner EMF:
+//   δEz = +(c_stab/2)(By_right − By_left) − (c_stab/2)(Bx_above − Bx_below)
+// Approximates whistlers as pure diffusion (overdamped, γ/ω ≈ π/2), per
+// Iwasaki & Tomida 2025. Stability c_stab·dt/h ≤ 1 enforced by compute_dt.
 // ---------------------------------------------------------------------------
 void CTDivergenceControl::add_hall_hll_stabilization(Grid& w, int nx, int ny,
                                                      double dx, double dy) {
@@ -925,10 +831,10 @@ void CTDivergenceControl::add_hall_hll_stabilization(Grid& w, int nx, int ny,
     #pragma omp parallel for collapse(2) schedule(static)
     for (int I = 0; I <= nx; ++I) {
         for (int J = 0; J <= ny; ++J) {
-            // 角点 (I,J) 对应周围四个单元格：w[I+1][J+1]..w[I+2][J+2]（含 2 层 ghost）
+            // Corner (I,J) averages the 4 surrounding cells (2 ghost layers).
             double rho_c = 0.25 * (w[I+1][J+1][0] + w[I+2][J+1][0]
                                  + w[I+1][J+2][0] + w[I+2][J+2][0]);
-            rho_c = std::max(rho_c, 0.1);  // 与 Hall CFL floor 一致
+            rho_c = std::max(rho_c, 0.1);  // matches Hall CFL floor
 
             double Bx_c = 0.25 * (w[I+1][J+1][5] + w[I+2][J+1][5]
                                  + w[I+1][J+2][5] + w[I+2][J+2][5]);
@@ -938,32 +844,26 @@ void CTDivergenceControl::add_hall_hll_stabilization(Grid& w, int nx, int ny,
                                  + w[I+1][J+2][7] + w[I+2][J+2][7]);
             double B2_c = Bx_c*Bx_c + By_c*By_c + Bz_c*Bz_c;
 
-            // 快磁声速上界（各向同性）：c_f² = (γp + B²)/ρ
-            // 在磁零点（|B|→0）时退化为纯声速 sqrt(γp/ρ)，提供物理非零下限；
-            // 在强场区 c_f << c_w，不显著改变 CFL。
+            // Fast-speed bound c_f² = (γp + B²)/ρ: physical nonzero floor at
+            // magnetic nulls; negligible vs c_w in strong-field regions.
             double p_c = 0.25 * (w[I+1][J+1][4] + w[I+2][J+1][4]
                                + w[I+1][J+2][4] + w[I+2][J+2][4]);
             p_c = std::max(p_c, 0.0);
             const double c_f_c = std::sqrt((gamma_ * p_c + B2_c) / rho_c);
 
-            // c_w = π·di·|B|/(ρ·mincell)：哨声波速，在磁零点诚实趋零
+            // Whistler speed; vanishes honestly at magnetic nulls.
             const double c_w = pi * hall_di_ * std::sqrt(B2_c) / (rho_c * mincell);
 
-            // c_stab = c_f + c_w：物理底（声速）＋哨声波速。
-            // 相对常数 B²_floor 的优点：X 点的 c_f≈sqrt(γp/ρ) 随空间变化，
-            // 对宏观重联模式（k~0.04）的额外耗散比 floor 方案低约 16 倍。
             const double c_stab = c_f_c + c_w;
 
-            // face_.by[i][J]：y 向面，i = 0..nx-1，J = 0..ny
-            // 角点 (I,J) 右侧 By face：i = I（若 I < nx），左侧：i = I-1
+            // By faces left/right of corner (I,J)
             int i_right = (bcx_ == BC::Periodic) ? (I < nx ? I : 0)
                                                   : (I < nx ? I : nx-1);
             int i_left  = (bcx_ == BC::Periodic) ? (I > 0 ? I-1 : nx-1)
                                                   : (I > 0 ? I-1 : 0);
             double jump_by = face_.by[i_right][J] - face_.by[i_left][J];
 
-            // face_.bx[I][j]：x 向面，I = 0..nx，j = 0..ny-1
-            // 角点 (I,J) 上方 Bx face：j = J（若 J < ny），下方：j = J-1
+            // Bx faces above/below corner (I,J)
             int j_above = (bcy_ == BC::Periodic) ? (J < ny ? J : 0)
                                                   : (J < ny ? J : ny-1);
             int j_below = (bcy_ == BC::Periodic) ? (J > 0 ? J-1 : ny-1)

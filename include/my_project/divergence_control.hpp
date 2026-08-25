@@ -16,44 +16,22 @@ public:
     virtual void post_step(Grid& w, int nx, int ny, double dt, double Lx, double Ly,
                            double dx, double dy) = 0;
     virtual const FaceField2D* face_field() const { return nullptr; }
-    // 非 const 访问：L3 checkpoint 续跑时把存档的面心 B 写回（仅 CT 有效）。
+    // Mutable access for checkpoint resume (CT only).
     virtual FaceField2D* mutable_face_field() { return nullptr; }
     virtual void set_adiabatic_index(double /*gamma*/) {}
 
-    // Set the boundary condition types so that the controller can apply the
-    // correct face-B BC and periodic EMF wrapping.
+    // The setters below are used by the CT controller only; others ignore them.
     virtual void set_boundary_conditions(BC /*bcx*/, BC /*bcy*/) {}
-
-    // Set uniform resistivity η for resistive MHD.  Default 0 (ideal MHD).
-    // Only the CT controller uses this; all others silently ignore it.
-    virtual void set_resistivity(double /*eta*/) {}
-
-    // Set ion inertial length d_i for Hall MHD.  Default 0 (no Hall term).
-    // Only the CT controller uses this; all others silently ignore it.
-    virtual void set_hall(double /*di*/) {}
-
-    // Set 4th-order hyper-resistivity coefficient η_H.  Default 0 (off).
-    // Only the CT controller uses this; all others silently ignore it.
-    virtual void set_hyper_resistivity(double /*eta_H*/) {}
-
-    // Enable non-ideal sub-cycling with a safety cap on N_sub.
-    // Only the CT controller uses this; all others silently ignore it.
+    virtual void set_resistivity(double /*eta*/) {}          // uniform η, 0 = ideal
+    virtual void set_hall(double /*di*/) {}                  // ion inertial length, 0 = off
+    virtual void set_hyper_resistivity(double /*eta_H*/) {}  // 4th-order η_H, 0 = off
     virtual void set_subcycle_options(bool /*enable*/, int /*nmax*/) {}
-
-    // Inform the controller of the current simulation time (used for diagnostic logging).
-    virtual void set_current_time(double /*t*/) {}
-
-    // Pass the CFL number so the sub-cycler can apply the same safety margin.
-    virtual void set_cfl(double /*cfl*/) {}
-
-    // 设置霍尔短波稳定化方案。仅 CT 控制器使用，其他静默忽略。
+    virtual void set_current_time(double /*t*/) {}           // for diagnostic logging
+    virtual void set_cfl(double /*cfl*/) {}                  // sub-cycler safety margin
     virtual void set_hall_stab(HallStabKind /*hs*/) {}
+    virtual void set_driven_ez(double /*ez*/) {}             // boundary Ez, 0 = off
 
-    // driven reconnection：y 边界指定恒定 E_z（0 = 关闭）。仅 CT 控制器使用。
-    virtual void set_driven_ez(double /*ez*/) {}
-
-    // Query the sub-cycle count used in the most recent post_step call.
-    // Returns 1 when sub-cycling was not active.
+    // Sub-cycle count of the most recent post_step (1 if not sub-cycling).
     virtual int  last_n_sub() const { return 1; }
 
     // CT interface: fill a contiguous buffer with the face-centered normal B
@@ -97,18 +75,9 @@ private:
 };
 
 // Constrained Transport divergence control.
-//
-// Primary B storage: face-centered bx[i][j] (x-faces, size (nx+1)×ny)
-//                    and by[i][j] (y-faces, size nx×(ny+1)).
-// Cell-centered B is derived from faces by averaging and is never used
-// as the authoritative source after initialization.
-//
-// Each directional sweep contributes interface EMFs (Ez) at the faces
-// normal to that sweep direction.  After all sweeps, corner EMFs are
-// formed by arithmetic averaging of the four surrounding interface EMFs
-// (with periodic wrapping for periodic BC), and face B is advanced via
-// the discrete Faraday law.  By stencil algebra this preserves ∇·B to
-// machine precision every step for all interior cells.
+// Authoritative B lives on faces; cell-centred B is a face average.
+// Sweeps supply interface EMFs → corner EMFs → discrete Faraday update,
+// which preserves ∇·B to machine precision every step.
 class CTDivergenceControl final : public DivergenceController {
 public:
     bool glm_enabled() const override { return false; }
@@ -168,43 +137,29 @@ private:
     double cfl_               = 0.3;  // CFL safety factor (matches compute_dt)
     int    last_n_sub_        = 1;    // set each post_step; readable via last_n_sub()
     HallStabKind hall_stab_  = HallStabKind::NONE;
-    double rho_floor_        = 0.02;  // 与 cfg.rho_floor 保持一致，由 initialize 写入
-    double driven_ez_        = 0.0;   // driven reconnection：y 边界恒定 E_z（0 = 关闭）
+    double rho_floor_        = 0.02;  // kept in sync with cfg.rho_floor by initialize
+    double driven_ez_        = 0.0;   // constant boundary Ez (0 = off)
 
     void initialize_faces_from_problem(const Grid& w, const RunConfig& cfg, double dx, double dy);
     void fill_faces_from_cell_centered(const Grid& w, int nx, int ny);
     void compute_corner_emf_from_interface_emfs(int nx, int ny);
-    // Add η·Jz to every corner EMF and η·Jz² (as Ohmic heating) to cell pressure.
-    // Called after compute_corner_emf_from_interface_emfs, before update_faces_from_emf.
-    // No-op when eta_ == 0 (ideal MHD).
+    // The correction stages below run between corner-EMF assembly and the
+    // Faraday update; each is a no-op when its coefficient is zero.
+    // η·Jz to corner EMF + Ohmic heating to cell pressure.
     void add_resistive_correction(Grid& w, int nx, int ny,
                                   double dt, double dx, double dy);
-
-    // Add −η_H·∇²Jz to every corner EMF, giving ∂B/∂t = −η_H·∇⁴B (biharmonic).
-    // Called after add_resistive_correction, before update_faces_from_emf.
-    // No-op when eta_H_ == 0.
+    // −η_H·∇²Jz to corner EMF → ∂B/∂t = −η_H·∇⁴B (biharmonic).
     void add_hyper_resistive_correction(int nx, int ny, double dx, double dy);
-
-    // Add Hall term (d_i/ρ) J × B to the induction equation:
-    //   1. Adds E_z^Hall = (d_i/ρ)(J_x B_y - J_y B_x) to corner EMF (→ drives Bx, By).
-    //   2. Updates cell-centred Bz via ∂Bz/∂t = ∂E_x^Hall/∂y - ∂E_y^Hall/∂x.
-    // Must be called after add_resistive_correction, before update_faces_from_emf.
-    // No-op when hall_di_ == 0.
+    // Hall term: Ez^Hall to corner EMF (drives Bx/By) + direct cell Bz update.
     void add_hall_correction(Grid& w, int nx, int ny,
                              double dt, double dx, double dy);
-    // driven BC：把 J=0（下）和 J=ny（上）两排角点 EMF 直接设为 value。
-    // 任意角点 EMF 值都不破坏 CT 的离散 div-B=0（旋度的散度恒为零）。
-    // 常数 E_z 沿边界排 → 边界 By face 增量为零，只向边界 Bx face 注入通量。
+    // Driven BC: set both y-boundary corner-EMF rows to value (div-B safe).
     void override_inflow_ez(int nx, int ny, double value);
     void update_faces_from_emf(int nx, int ny, double dt, double dx, double dy);
     void sync_cell_centered_from_faces(Grid& w, int nx, int ny) const;
     void apply_face_bc(int nx, int ny);
-
-    // HLL 型哨声波速耗散（Path B）。
-    // 向角点 EMF 叠加一阶迎风扩散：δEz[I][J] += (c_w/2)·ΔBy_x − (c_w/2)·ΔBx_y
-    // 稳定性条件：c_w·dt/mincell ≤ 1（由 compute_dt 中的 smax_hll 项保证）
-    // 参考：Iwasaki & Tomida 2025（Hall-HLL 弥散近似）
-    void add_hall_hll_stabilization(Grid& w, int nx, int ny, double dx, double dy); // experimental, deprioritized
+    // Hall-HLL whistler-speed upwind diffusion (Path B); experimental.
+    void add_hall_hll_stabilization(Grid& w, int nx, int ny, double dx, double dy);
 };
 
 } // namespace my_project
