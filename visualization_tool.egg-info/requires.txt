@@ -1,0 +1,7 @@
+numpy
+matplotlib
+
+[full]
+scipy
+pandas
+pillow

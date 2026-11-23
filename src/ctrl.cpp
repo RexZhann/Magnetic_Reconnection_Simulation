@@ -102,6 +102,16 @@ HallStabKind to_hall_stab(const std::string& key, const Entry& e) {
                              + "' must be 'none', 'hyper_res' or 'hall_hll'");
 }
 
+BC to_bc(const std::string& key, const Entry& e) {
+    const std::string v = lower(e.value);
+    if (v == "periodic" || v == "p") return BC::Periodic;
+    if (v == "transmissive" || v == "outflow" || v == "t") return BC::Transmissive;
+    throw std::runtime_error("ctrl line " + std::to_string(e.line) + ": '" + key
+                             + "' must be 'periodic' or 'transmissive'");
+}
+
+const char* bc_str(BC b) { return b == BC::Periodic ? "periodic" : "transmissive"; }
+
 const char* divb_str(DivBCleaningKind d) {
     switch (d) {
         case DivBCleaningKind::CT: return "CT";
@@ -183,6 +193,8 @@ RunConfig load_ctrl(const std::string& path) {
         {"p_floor",    [&](auto& k, auto& e) { cfg.p_floor = to_double(k, e); }},
         {"subcycle_nonideal", [&](auto& k, auto& e) { cfg.subcycle_nonideal = to_bool(k, e); }},
         {"n_subcycle_max",    [&](auto& k, auto& e) { cfg.n_subcycle_max = to_int(k, e); }},
+        {"bc_x",       [&](auto& k, auto& e) { cfg.bcx = to_bc(k, e); }},
+        {"bc_y",       [&](auto& k, auto& e) { cfg.bcy = to_bc(k, e); }},
         // &time_control
         {"t_start",    [&](auto& k, auto& e) { cfg.t_start = to_double(k, e); }},
         {"t_stop",     [&](auto& k, auto& e) { cfg.t_end = to_double(k, e); }},
@@ -206,6 +218,7 @@ RunConfig load_ctrl(const std::string& path) {
         {"rho2", [&](auto& k, auto& e) { cfg.asym_rho2 = cfg.dh_rho02 = to_double(k, e); }},
     };
 
+    const BC bcx_default = cfg.bcx, bcy_default = cfg.bcy;
     bool profile_given = false;
     for (const auto& [key, entry] : kv) {
         auto it = setters.find(key);
@@ -225,6 +238,23 @@ RunConfig load_ctrl(const std::string& path) {
     if (profile_given && !uses_asym_profile(cfg.test) && cfg.test != 31)
         std::cerr << "[ctrl] warning: B1/B2/rho1/rho2 are only used by tests "
                      "25-28, 30, 31; ignored for test " << cfg.test << "\n";
+    // Boundary-condition consistency.
+    if (cfg.bcy == BC::Periodic && cfg.driven_ez != 0.0)
+        throw std::runtime_error("ctrl: driven_ez drives the y boundaries and needs "
+                                 "bc_y = 'transmissive'");
+    if (cfg.bcy == BC::Periodic && cfg.dirichlet_y_scalars)
+        throw std::runtime_error("ctrl: test 28 Dirichlet y boundaries need "
+                                 "bc_y = 'transmissive'");
+    if (cfg.bcx != bcx_default || cfg.bcy != bcy_default) {
+        std::cerr << "[ctrl] warning: boundary conditions changed from the test " << cfg.test
+                  << " default (x=" << bc_str(bcx_default) << ", y=" << bc_str(bcy_default)
+                  << ") to x=" << bc_str(cfg.bcx) << ", y=" << bc_str(cfg.bcy)
+                  << "; the initial condition was built for the default.\n";
+        if (cfg.test == 31 || cfg.test == 29)
+            std::cerr << "[ctrl] warning: the double Harris sheet is constructed for a "
+                         "doubly periodic box; non-periodic boundaries cut the outer "
+                         "sheet at y = +/-Ly/2.\n";
+    }
 
     sync_derived_params(cfg);
     return cfg;
@@ -297,6 +327,7 @@ void print_config(const RunConfig& cfg) {
               << "  solver=" << (cfg.solver == SolverKind::FORCE ? "FORCE" : "HLLD")
               << "  divB=" << divb_str(cfg.divb) << "  cfl=" << cfg.cfl
               << "  gamma=" << cfg.gamma << "\n"
+              << "  bc x=" << bc_str(cfg.bcx) << "  y=" << bc_str(cfg.bcy) << "\n"
               << "  domain x=[" << cfg.x0 << ", " << cfg.x1 << "]  y=[" << cfg.y0
               << ", " << cfg.y1 << "]\n"
               << "  t_start=" << cfg.t_start << "  t_stop=" << cfg.t_end

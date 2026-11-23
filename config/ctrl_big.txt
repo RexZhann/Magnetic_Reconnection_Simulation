@@ -1,0 +1,64 @@
+! MHD2D USER CONTROL DECK
+!--------
+! Usage:  ./build/mhd2d config/ctrl.txt
+! Syntax: key = value   ! comment.  Keys are case-insensitive, '&group' lines
+! are only for readability.  Set a key to `default` (or delete/comment the
+! line) to keep the built-in value of the selected test.  Unknown keys are an
+! error.  A copy of this file is written to <output_dir>/<label>/ctrl_used.txt.
+
+&problem
+      output_dir = 'output/'       ! Directory for output data. Any path works and is created
+                                   !   if missing: absolute ('/full/path/'), relative to the
+                                   !   repo root ('output/'), '~/...', or with env variables
+                                   !   ('$SCRATCH/mhd/', '${HOME}/runs/'). Trailing '/' optional.
+      label      = 'AB1big'           ! Run subfolder: results in <output_dir>/<label>/.
+                                   !   Set label = '' to write straight into output_dir.
+      test       = 31              ! Problem id (see README.md). Reconnection setups:
+                                   !   25/26 asym single sheet (26: driven Ez), 27 asym scan,
+                                   !   28 driven + Dirichlet y, 29 sym double sheet,
+                                   !   30 resistive asym scan, 31 CS2008 double-sheet campaign
+      resume     = .false.         ! Test 31 only: continue from <output_dir>/<label>/ckpt.bin
+      ic_check   = .false.         ! Only build the IC and print self-checks, no time stepping
+&end
+
+&numerics
+      nx         = 2048            ! Cells in x  (test 31: dx = 0.1 fixed, Lx = 0.1*nx)
+      ny         = 1024            ! Cells in y  (test 31: Ly = 0.1*ny)
+      divb       = 'CT'            ! Div-B control: 'CT', 'GLM' or 'none' (Hall/eta need CT)
+      solver     = 'HLLD'          ! Riemann solver: 'HLLD' or 'FORCE'
+      bc_x       = default         ! Boundaries in x: 'periodic' or 'transmissive' (outflow)
+      bc_y       = default         ! Boundaries in y. Defaults per test; test 31 = periodic
+                                   !   in both (the double sheet needs a periodic box)
+      cfl        = default         ! CFL number (test default 0.3 for HLLD)
+      gamma      = default         ! Adiabatic index (reconnection tests: 5/3)
+      rho_floor  = default         ! Density floor (0 = off)
+      p_floor    = default         ! Pressure floor (0 = off)
+&end
+
+&time_control
+      t_start    = 0.              ! Initial time stamp (Alfven times); IC is unchanged
+      t_stop     = 400.            ! Stop time
+      output_dt  = default         ! Snapshot interval (0 = final only; test 31 uses L1/L2/L3)
+      l1_dt      = default         ! Test 31: L1 diagnostics row interval (default 0.5)
+      ckpt_dt    = default         ! Test 31: checkpoint interval (default 10)
+      l2_stride  = 1               ! Test 31: coarsen every L2 frame by this factor
+&end
+
+&physics
+      eta        = default         ! Uniform resistivity (0 = ideal)
+      eta_H      = default         ! Hyper-resistivity (tests 27-31 scale it with dx^2)
+      hall_di    = default         ! Ion inertial length for the Hall term (0 = off)
+      hall_stab  = default         ! Hall stabilisation: 'none', 'hyper_res', 'hall_hll'
+      psi0       = default         ! Perturbation amplitude (tests 29/31: 1 = CS2008 kick)
+      driven_ez  = default         ! Tests 26/28: boundary Ez drive (must be < 0)
+&end
+
+&profile
+      ! Asymmetric single sheet (tests 25-28, 30): 1 = y>0 side, 2 = y<0 side.
+      ! Double sheet (test 31): 1 = outer sheet (B01, rho01), 2 = inner (B02, rho02).
+      ! Pressure is set by balance: P_total from max(B1,B2) (beta_min = 4 for test 31).
+      B1         = 1.              ! Upstream field, side 1
+      B2         = 2.              ! Upstream field, side 2
+      rho1       = 1.              ! Upstream density, side 1
+      rho2       = 1.              ! Upstream density, side 2
+&end

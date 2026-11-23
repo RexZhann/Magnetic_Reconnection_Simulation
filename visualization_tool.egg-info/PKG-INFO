@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: visualization_tool
+Version: 0.1.0
+Summary: Readers, diagnostics and figures for mhd2d reconnection output
+Requires-Python: >=3.9
+Requires-Dist: numpy
+Requires-Dist: matplotlib
+Provides-Extra: full
+Requires-Dist: scipy; extra == "full"
+Requires-Dist: pandas; extra == "full"
+Requires-Dist: pillow; extra == "full"

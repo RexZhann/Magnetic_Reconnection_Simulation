@@ -113,7 +113,7 @@ make clean
 | group | key | meaning |
 |---|---|---|
 | problem | `output_dir`, `label`, `test` (required), `resume`, `ic_check` | results go to `output_dir/label` (folder created automatically; `~` and `$VAR` expanded); `resume` restarts test 31 from `ckpt.bin` |
-| numerics | `nx`, `ny`, `divb` (`CT`/`GLM`/`none`), `solver` (`HLLD`/`FORCE`), `cfl`, `gamma`, `rho_floor`, `p_floor`, `subcycle_nonideal`, `n_subcycle_max` | |
+| numerics | `nx`, `ny`, `divb` (`CT`/`GLM`/`none`), `solver` (`HLLD`/`FORCE`), `bc_x`, `bc_y` (`periodic`/`transmissive`), `cfl`, `gamma`, `rho_floor`, `p_floor`, `subcycle_nonideal`, `n_subcycle_max` | boundaries default per test (test 31: periodic in x and y); changing them prints a warning; `driven_ez` and test 28 need `bc_y = transmissive` |
 | time_control | `t_start`, `t_stop`, `output_dt`, `l1_dt`, `ckpt_dt`, `l2_stride` | `t_start` shifts the clock; the initial condition is unchanged |
 | physics | `eta`, `eta_H`, `hall_di`, `hall_stab`, `psi0`, `driven_ez` | |
 | profile | `B1`, `B2`, `rho1`, `rho2` | tests 25–28, 30: 1 = y>0 side, 2 = y<0 side. Test 31: 1 = outer sheet (B01, ρ01), 2 = inner sheet (B02, ρ02) |

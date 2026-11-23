@@ -13,6 +13,8 @@
       ny         = 32
       divb       = 'CT'
       solver     = 'HLLD'
+      bc_x       = default
+      bc_y       = default
 &end
 
 &time_control

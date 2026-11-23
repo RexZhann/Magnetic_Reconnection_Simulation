@@ -26,6 +26,9 @@
       ny         = 512             ! Cells in y  (test 31: Ly = 0.1*ny)
       divb       = 'CT'            ! Div-B control: 'CT', 'GLM' or 'none' (Hall/eta need CT)
       solver     = 'HLLD'          ! Riemann solver: 'HLLD' or 'FORCE'
+      bc_x       = default         ! Boundaries in x: 'periodic' or 'transmissive' (outflow)
+      bc_y       = default         ! Boundaries in y. Defaults per test; test 31 = periodic
+                                   !   in both (the double sheet needs a periodic box)
       cfl        = default         ! CFL number (test default 0.3 for HLLD)
       gamma      = default         ! Adiabatic index (reconnection tests: 5/3)
       rho_floor  = default         ! Density floor (0 = off)
