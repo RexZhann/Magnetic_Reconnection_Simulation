@@ -3,6 +3,7 @@
 #include "my_project/perf.hpp"
 #include "my_project/harris_sheet.hpp"
 #include "my_project/asym_harris_sheet.hpp"
+#include "my_project/ctrl.hpp"
 #include "my_project/double_harris.hpp"
 #include "my_project/riemann.hpp"
 #include "my_project/state.hpp"
@@ -30,10 +31,8 @@ namespace my_project {
 namespace {
 using Clock = std::chrono::steady_clock;
 
-// Output dir (no trailing slash): output/{label} or output.
-std::string cfg_outdir(const RunConfig& cfg) {
-    return cfg.label.empty() ? "output" : "output/" + cfg.label;
-}
+// Output dir (no trailing slash): {output_dir}/{label} or {output_dir}.
+std::string cfg_outdir(const RunConfig& cfg) { return run_output_dir(cfg); }
 
 using Sec = std::chrono::duration<double>;
 
@@ -1094,13 +1093,7 @@ void initialize_problem(Grid& w, const RunConfig& cfg) {
                                 0.0 };
                     break;
                 }
-                case 25: case 26: {
-                    AsymHarrisParams ap25;
-                    ap25.psi0 = cfg.psi0;
-                    w[i][j] = asym_cell_ic(x, y, ap25);
-                    break;
-                }
-                case 27: case 28: case 30: {
+                case 25: case 26: case 27: case 28: case 30: {
                     w[i][j] = asym_cell_ic(x, y, asym_scan_params(cfg));
                     break;
                 }
@@ -1256,15 +1249,10 @@ L1Row campaign_l1_compute(const Grid& w, const RunConfig& cfg,
 // {31, nx_out, ny_out, stride, t, nvar} then float32 data (k, j, i order).
 void write_l2_frame(const Grid& w, const RunConfig& cfg, double t,
                     const std::string& tag, int stride, CampaignState& cs) {
-    // L2_STRIDE env multiplies every L2 frame stride (I/O size only, default 1).
+    // cfg.l2_stride (ctrl l2_stride / env L2_STRIDE) multiplies every L2 frame
+    // stride (I/O size only, default 1).
     // Header records the actual stride, so readers need no change.
-    static const int l2_mult = [] {
-        const char* s = std::getenv("L2_STRIDE");
-        const int v = s ? std::atoi(s) : 1;
-        if (v > 1) std::cout << "[campaign] L2_STRIDE=" << v
-                             << " (all L2 frames coarsened)\n";
-        return std::max(1, v);
-    }();
+    const int l2_mult = std::max(1, cfg.l2_stride);
     stride *= l2_mult;
     if (cs.n_l2 >= 15) {
         std::cout << "[campaign] L2 cap (15) reached, frame '" << tag
@@ -1450,11 +1438,12 @@ bool campaign_init(CampaignState& cs, Grid& w, DivergenceController& divb,
     cs.dir = cfg_outdir(cfg);
     cs.l1_path = cs.dir + "/l1.csv";
     cs.ckpt_path = cs.dir + "/ckpt.bin";
-    cs.next_ckpt = cfg.ckpt_dt;
+    cs.next_ckpt = t + cfg.ckpt_dt;
+    cs.next_flush = t + 50.0;    // schedules relative to t_start
+    cs.next_coarse = t + 50.0;
     g_floor_rho_count = 0; g_floor_p_count = 0; g_fallback_count.store(0);
 
-    const char* rs = std::getenv("RESUME");
-    const bool want_resume = (rs && rs[0] == '1');
+    const bool want_resume = cfg.resume;
     if (want_resume) {
         FaceField2D* ff = divb.mutable_face_field();
         if (ff && load_ckpt(cs, w, ff, cfg, t, step)) {
@@ -1575,9 +1564,9 @@ bool campaign_init(CampaignState& cs, Grid& w, DivergenceController& divb,
                       << std::defaultfloat << "\n";
         }
     }
-    campaign_l1_tick(cs, w, cfg, divb, dx, dy, 0.0, 0.0, 0);
-    cs.next_l1 = cfg.l1_dt;
-    write_l2_frame(w, cfg, 0.0, "t0", 1, cs);
+    campaign_l1_tick(cs, w, cfg, divb, dx, dy, t, 0.0, 0);
+    cs.next_l1 = t + cfg.l1_dt;
+    write_l2_frame(w, cfg, t, "t0", 1, cs);
     return false;
 }
 } // namespace
@@ -1604,7 +1593,7 @@ OutputData run_simulation(const RunConfig& cfg) {
     divb->set_driven_ez(cfg.driven_ez);
     divb->initialize(w, cfg, dx, dy);
 
-    double t = 0.0;
+    double t = cfg.t_start;
     int step = 0;
     double t_sweepx = 0.0, t_sweepy = 0.0, t_other = 0.0;
     auto T0 = Clock::now();
@@ -1628,11 +1617,11 @@ OutputData run_simulation(const RunConfig& cfg) {
     // Snapshot output: write at t=0, then every output_dt.
     const bool do_snaps = cfg.output_dt > 0.0;
     int snap_idx = 0;
-    double next_snap_t = cfg.output_dt;
+    double next_snap_t = t + cfg.output_dt;
     if (do_snaps) {
         auto dB0 = compute_divB(w, cfg.nx, cfg.ny, dx, dy, divb->face_field());
-        write_snapshot_file(w, dB0, cfg, snap_idx++, 0.0);
-        std::cout << "Snapshot 0 written (t=0)\n";
+        write_snapshot_file(w, dB0, cfg, snap_idx++, t);
+        std::cout << "Snapshot 0 written (t=" << t << ")\n";
     }
 
     // L2 divB log: one line per diagnostic interval.
@@ -1645,7 +1634,7 @@ OutputData run_simulation(const RunConfig& cfg) {
     if (!campaign_resumed) {
         divb_log << "# t  l2_divB\n";
         Diagnostics d0 = compute_diagnostics(w, cfg.nx, cfg.ny, dx, dy, divb->face_field());
-        divb_log << 0.0 << ' ' << d0.l2_divB << '\n';
+        divb_log << t << ' ' << d0.l2_divB << '\n';
     }
 
     while (t < cfg.t_end) {

@@ -1,0 +1,5 @@
+numpy
+matplotlib
+pillow     # GIF export
+scipy      # whistler fit, sweep scaling fit
+pandas     # sweep analysis

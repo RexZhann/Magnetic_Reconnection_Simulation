@@ -1,9 +1,11 @@
+#include "my_project/ctrl.hpp"
 #include "my_project/solver.hpp"
 #include "my_project/perf.hpp"
 
 #include <algorithm>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <omp.h>
@@ -21,46 +23,104 @@ std::string divb_name(DivBCleaningKind d) {
 }
 }
 
+namespace {
+bool is_number(const char* s) {
+    char* end = nullptr;
+    std::strtod(s, &end);
+    return end != s && *end == '\0';
+}
+
+void usage(const char* prog) {
+    std::cerr << "Usage:\n"
+              << "  " << prog << " config/ctrl.txt        (recommended)\n"
+              << "  " << prog << " --print-outdir config/ctrl.txt\n"
+              << "  " << prog << " <test> [nx ny divb solver etaH t_end label psi0 Ez B2 rho1 B01 B02 rho01 rho02]\n"
+              << "                                (legacy positional CLI)\n";
+}
+
+// Legacy positional CLI (kept for deploy_server/ scripts and old notes).
+RunConfig config_from_argv(int argc, char* argv[]) {
+    int test = 0, nx = 200, ny = 200;
+    DivBCleaningKind divb = DivBCleaningKind::GLM;
+    SolverKind solver = SolverKind::HLLD;
+
+    if (argc > 1) test = std::atoi(argv[1]);
+    if (argc > 2) nx = std::atoi(argv[2]);
+    if (argc > 3) ny = std::atoi(argv[3]);
+    if (argc > 4) {
+        int v = std::atoi(argv[4]);
+        if (v == 2) divb = DivBCleaningKind::CT;
+        else if (v == 1) divb = DivBCleaningKind::GLM;
+        else divb = DivBCleaningKind::None;
+    }
+    if (argc > 5) solver = (std::atoi(argv[5]) == 0) ? SolverKind::FORCE : SolverKind::HLLD;
+
+    RunConfig cfg = make_config_for_test(test, nx, ny, divb, solver);
+
+    // Optional CLI overrides: 6-9 eta_H, t_end, label, psi0
+    if (argc > 6) { double v = std::atof(argv[6]); if (v >= 0.0) cfg.eta_H = v; }
+    if (argc > 7) { double v = std::atof(argv[7]); if (v >  0.0) cfg.t_end = v; }
+    if (argc > 8) cfg.label = std::string(argv[8]);
+    if (argc > 9) { double v = std::atof(argv[9]); if (v > 0.0) cfg.psi0 = v; }
+    // 10: driven_ez (test 26; must be negative for inflow drive)
+    if (argc > 10) cfg.driven_ez = std::atof(argv[10]);
+    // 11/12: asymmetry scan B2, rho1 (B1 = rho2 = 1)
+    if (argc > 11) { double v = std::atof(argv[11]); if (v > 0.0) cfg.asym_B2   = v; }
+    if (argc > 12) { double v = std::atof(argv[12]); if (v > 0.0) cfg.asym_rho1 = v; }
+    // 13-16: test 31 double-sheet B01/B02/rho01/rho02 (CS2008 Table 1)
+    if (argc > 13) { double v = std::atof(argv[13]); if (v > 0.0) cfg.dh_B01   = v; }
+    if (argc > 14) { double v = std::atof(argv[14]); if (v > 0.0) cfg.dh_B02   = v; }
+    if (argc > 15) { double v = std::atof(argv[15]); if (v > 0.0) cfg.dh_rho01 = v; }
+    if (argc > 16) { double v = std::atof(argv[16]); if (v > 0.0) cfg.dh_rho02 = v; }
+    sync_derived_params(cfg);
+    return cfg;
+}
+} // namespace
+
 int main(int argc, char* argv[]) {
     try {
-        int test = 0, nx = 200, ny = 200;
-        DivBCleaningKind divb = DivBCleaningKind::GLM;
-        SolverKind solver = SolverKind::HLLD;
-
-        if (argc > 1) test = std::atoi(argv[1]);
-        if (argc > 2) nx = std::atoi(argv[2]);
-        if (argc > 3) ny = std::atoi(argv[3]);
-        if (argc > 4) {
-            int v = std::atoi(argv[4]);
-            if (v == 2) divb = DivBCleaningKind::CT;
-            else if (v == 1) divb = DivBCleaningKind::GLM;
-            else divb = DivBCleaningKind::None;
+        if (argc > 1 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help")) {
+            usage(argv[0]);
+            return 0;
         }
-        if (argc > 5) solver = (std::atoi(argv[5]) == 0) ? SolverKind::FORCE : SolverKind::HLLD;
 
-        RunConfig cfg = make_config_for_test(test, nx, ny, divb, solver);
+        // --print-outdir <deck>: print the resolved output folder and exit
+        // (used by scripts/ to place their logs).
+        if (argc == 3 && std::string(argv[1]) == "--print-outdir") {
+            std::cout << run_output_dir(load_ctrl(argv[2])) << '\n';
+            return 0;
+        }
 
-        // Optional CLI overrides: 6-9 eta_H, t_end, label, psi0
-        if (argc > 6) { double v = std::atof(argv[6]); if (v >= 0.0) cfg.eta_H = v; }
-        if (argc > 7) { double v = std::atof(argv[7]); if (v >  0.0) cfg.t_end = v; }
-        if (argc > 8) cfg.label = std::string(argv[8]);
-        if (argc > 9) { double v = std::atof(argv[9]); if (v > 0.0) cfg.psi0 = v; }
-        // 10: driven_ez (test 26; must be negative for inflow drive)
-        if (argc > 10) cfg.driven_ez = std::atof(argv[10]);
-        // 11/12: test 27 asymmetry scan B2, rho1 (B1 = rho2 = 1 fixed)
-        if (argc > 11) { double v = std::atof(argv[11]); if (v > 0.0) cfg.asym_B2   = v; }
-        if (argc > 12) { double v = std::atof(argv[12]); if (v > 0.0) cfg.asym_rho1 = v; }
-        // 13-16: test 31 double-sheet B01/B02/rho01/rho02 (CS2008 Table 1)
-        if (argc > 13) { double v = std::atof(argv[13]); if (v > 0.0) cfg.dh_B01   = v; }
-        if (argc > 14) { double v = std::atof(argv[14]); if (v > 0.0) cfg.dh_B02   = v; }
-        if (argc > 15) { double v = std::atof(argv[15]); if (v > 0.0) cfg.dh_rho01 = v; }
-        if (argc > 16) { double v = std::atof(argv[16]); if (v > 0.0) cfg.dh_rho02 = v; }
+        RunConfig cfg;
+        std::string ctrl_path;
+        if (argc == 2 && !is_number(argv[1])) {
+            ctrl_path = argv[1];
+            cfg = load_ctrl(ctrl_path);
+        } else {
+            cfg = config_from_argv(argc, argv);
+        }
+        apply_env_overrides(cfg);
 
-        // IC_CHECK=1: initialize and print IC checks only, skip the main loop.
-        if (const char* icc = std::getenv("IC_CHECK"); icc && icc[0] == '1') {
-            cfg.t_end = 0.0;
+        // ic_check: initialize and print IC checks only, skip the main loop.
+        if (cfg.ic_check) {
+            cfg.t_end = cfg.t_start;
             std::cout << "[IC_CHECK] t=0 self-check mode: no time stepping\n";
         }
+
+        print_config(cfg);
+
+        // Create the output folder up front (fails early on a bad path) and
+        // keep a copy of the deck next to the results (provenance).
+        const std::filesystem::path outdir = run_output_dir(cfg);
+        try {
+            std::filesystem::create_directories(outdir);
+        } catch (const std::exception& e) {
+            throw std::runtime_error("cannot create output folder '" + outdir.string()
+                                     + "': " + e.what());
+        }
+        if (!ctrl_path.empty())
+            std::filesystem::copy_file(ctrl_path, outdir / "ctrl_used.txt",
+                                       std::filesystem::copy_options::overwrite_existing);
 
         std::cout << "Test " << cfg.test << ", " << cfg.nx << "x" << cfg.ny
                   << ", " << (cfg.solver == SolverKind::FORCE ? "FORCE" : "HLLD")

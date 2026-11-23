@@ -58,12 +58,15 @@ struct AsymHarrisParams {
     }
 };
 
-// test 27 asymmetry scan: params from RunConfig (B1 = rho2 = 1 fixed;
-// P_total = max(B²)/2 + 1 keeps the strong-side pressure floor at 1).
+// Asymmetric-sheet params from RunConfig (tests 25-28, 30).
+// P_total = max(B²)/2 + 1 keeps the strong-side pressure floor at 1; with the
+// defaults (B1=1, B2=2, rho1=2, rho2=1) this equals the test-25 P_total = 3.
 inline AsymHarrisParams asym_scan_params(const RunConfig& cfg) {
     AsymHarrisParams ap;
+    ap.B1      = cfg.asym_B1;
     ap.B2      = cfg.asym_B2;
     ap.rho1    = cfg.asym_rho1;
+    ap.rho2    = cfg.asym_rho2;
     ap.P_total = 0.5 * std::max(ap.B1 * ap.B1, ap.B2 * ap.B2) + 1.0;
     ap.Lx      = cfg.x1 - cfg.x0;
     ap.Ly      = cfg.y1 - cfg.y0;

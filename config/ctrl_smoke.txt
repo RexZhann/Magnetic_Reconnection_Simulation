@@ -1,0 +1,28 @@
+! MHD2D SMOKE-TEST DECK: small, quick run to check a fresh build (~1 min).
+!   ./scripts/run_local.sh config/ctrl_smoke.txt
+! Same keys as ctrl.txt; anything not listed keeps the test default.
+
+&problem
+      output_dir = 'output/'
+      label      = 'smoke'
+      test       = 31
+&end
+
+&numerics
+      nx         = 64
+      ny         = 32
+      divb       = 'CT'
+      solver     = 'HLLD'
+&end
+
+&time_control
+      t_start    = 0.
+      t_stop     = 5.
+&end
+
+&profile
+      B1         = 1.
+      B2         = 1.
+      rho1       = 1.
+      rho2       = 1.
+&end

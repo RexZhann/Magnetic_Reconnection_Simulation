@@ -57,6 +57,7 @@ struct RunConfig {
     double cfl = 0.3;
     double x0 = 0.0, x1 = 1.0;
     double y0 = 0.0, y1 = 1.0;
+    double t_start = 0.0;   // initial simulation time (clock offset; IC unchanged)
     double t_end = 0.25;
     BC bcx = BC::Transmissive;
     BC bcy = BC::Transmissive;
@@ -96,8 +97,12 @@ struct RunConfig {
 
     // test 27 asymmetry scan: B2 and rho1 configurable, B1 = rho2 = 1 fixed
     // (CLI 11/12; defaults = R2 configuration).
+    // asym_B1 / asym_rho2 default to 1 (the original fixed values); they are
+    // set from ctrl.txt B1 / rho2 (tests 25-28, 30).
+    double asym_B1   = 1.0;
     double asym_B2   = 2.0;
     double asym_rho1 = 2.0;
+    double asym_rho2 = 1.0;
 
     // test 28 Dirichlet inflow scalars: fix y-ghost rho/p to upstream values
     // so long driven runs keep a mass reservoir (v/B unchanged).
@@ -122,6 +127,13 @@ struct RunConfig {
     // test 31 double sheet (CS2008 Eq. 3-4): 01 = outer, 02 = inner.
     // CLI 13-16; all 1 = symmetric tier.
     double dh_B01 = 1.0, dh_B02 = 1.0, dh_rho01 = 1.0, dh_rho02 = 1.0;
+
+    // Run control (formerly env vars RESUME / L2_STRIDE / IC_CHECK; the env
+    // vars still work and are OR-ed in by main).
+    std::string output_dir = "output";  // root; files go to {output_dir}/{label}
+    bool resume    = false;   // test 31: continue from {output_dir}/{label}/ckpt.bin
+    int  l2_stride = 1;       // test 31: multiply every L2 frame stride
+    bool ic_check  = false;   // initialise + print IC checks only, no stepping
 };
 
 struct Diagnostics {

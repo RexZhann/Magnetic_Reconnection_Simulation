@@ -28,8 +28,11 @@ chmod +x deploy_server/*.sh
 ```bash
 bash deploy_server/build.sh          # 裸 g++ -O3 -fopenmp -march=native
 free -h && df -h /tmp
-python3 -c "import numpy, matplotlib, pandas" \
-  || pip install --user -r deploy_server/requirements.txt
+python3 -c "import numpy, matplotlib" \
+  || pip install --user numpy matplotlib   # 服务器出图只需这两个
+# 服务器端快速出图（原 deploy_server/plot_tier.py）：
+#   python3 -m visualization_tool tier output/test29_campaign/AB1 --t-cut 170
+#   关键帧挑选（原 PLOT_FRAMES 环境变量）：--frames 0,209,300,400
 ```
 
 ## 2. 缩尺冒烟 + RESUME 实测（这台机器上必须实测，不沿用本机结论）
@@ -88,8 +91,9 @@ AB1 → AN1 → ABN1 → AB2 → AN2 → ABN2 → AB3 → AN3
 每档回传后在**本机**出 summary 与图：
 
 ```bash
-python output/test29_campaign/analyze_tier.py AB1
-python output/test29_campaign/make_stage0_figs.py   # 改 DIR/tier 后复用
+python -m visualization_tool summary output/test29_campaign/AB1   # 判读 summary（原 analyze_tier.py）
+python -m visualization_tool tier    output/test29_campaign/AB1   # 全套图 + t_cut 统计
+python -m visualization_tool stage0                               # Sym/AB1/AB2 对比图
 ```
 
 ## 参数表（CS2008 Table 1，2026-07 对照 PDF 逐行核过）
@@ -109,7 +113,7 @@ python output/test29_campaign/make_stage0_figs.py   # 改 DIR/tier 后复用
 压强/温度全部由 β_min=4 规则代码生成（P_total=(B_max²/2)(1+β_min)，
 Pi = P_total − B0i²/2，Ti = Pi/ρ0i），启动时打印对照。
 
-## AB1 判读要点（summary 模板已在 analyze_tier.py 落实）
+## AB1 判读要点（summary 模板已在 visualization_tool/campaign.py 落实）
 
 - 硬检查：4 项判定（压平衡 0.5% 双片标准 / div-B / floor / A-B <10%），
   **对称性分片报告不设阈值**（已裁决）；

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "visualization_tool"
+version = "0.1.0"
+description = "Readers, diagnostics and figures for mhd2d reconnection output"
+requires-python = ">=3.9"
+dependencies = ["numpy", "matplotlib"]   # enough for the campaign commands (server)
+
+[project.optional-dependencies]
+full = ["scipy", "pandas", "pillow"]     # whistler fit, sweep analysis, GIF export
+
+[project.scripts]
+mhdviz = "visualization_tool.__main__:main"
+
+[tool.setuptools]
+packages = ["visualization_tool", "visualization_tool.plotting"]
